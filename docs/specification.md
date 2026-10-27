@@ -168,6 +168,11 @@ Points of attention:
   raise `mod_audio_stream::disconnect` on hang-up, only when the server closes the connection.
 - **Deployment:** the bench's ESL listens on `127.0.0.1` only. In production the bot needs access to the event socket
   (ACL + password); document it in the README.
+- **Sample rates (measured 2026-10-27, PCMU and Opus):** bot audio must reach FreeSWITCH at the channel rate;
+  per-file resampling in FreeSWITCH leaves artefacts at every seam. Opus runs at 48 kHz inside FreeSWITCH, and raw
+  audio cannot be played at 48 kHz (`.r48` is not a mod_sndfile format), so 48 kHz goes as WAV. Resampling in the
+  serializer must hold nothing back (SOXR "QQ"): nothing flushes the resampler at the end of an utterance. Input and
+  output rates are separate parameters (16 kHz caller audio for STT/VAD, 48 kHz bot audio on Opus).
 - **ptime:** measurements used 20 ms. With another ptime the `uuid_broadcast` gap would change (5 × ptime); with
   `sendmsg` it should not matter, but check it in the harness with different codecs.
 

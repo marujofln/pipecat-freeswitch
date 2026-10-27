@@ -10,7 +10,9 @@ import base64
 import json
 
 from loguru import logger
-from pipecat.audio.utils import create_stream_resampler
+from pipecat.audio.resamplers.base_audio_resampler import SoxrQuality
+from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
+from pipecat.audio.utils import create_stream_resampler, pcm_to_wav
 from pipecat.frames.frames import (
     AudioRawFrame,
     CancelFrame,
@@ -24,8 +26,11 @@ from pipecat.serializers.base_serializer import FrameSerializer
 
 from pipecat_freeswitch.control import FreeSWITCHControl
 
-# Sample rates mod_audio_stream accepts for raw streamAudio payloads.
-_RAW_SAMPLE_RATES = (8000, 16000, 24000, 32000, 48000, 64000)
+# Raw streamAudio payloads become .r8/.r16/... files, and mod_sndfile only plays raw audio at these
+# rates. 48 kHz is sent as WAV instead, which mod_sndfile plays at any rate.
+_RAW_SAMPLE_RATES = (8000, 16000, 24000, 32000)
+_WAV_SAMPLE_RATES = (48000,)
+_OUT_SAMPLE_RATES = _RAW_SAMPLE_RATES + _WAV_SAMPLE_RATES
 
 
 class FreeSWITCHFrameSerializer(FrameSerializer):
@@ -34,6 +39,12 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
     Caller audio arrives as binary L16 frames and becomes ``InputAudioRawFrame``.
     Bot audio leaves as ``streamAudio`` JSON messages, one per output frame, so
     the block size is the transport's ``audio_out_10ms_chunks`` setting.
+
+    Bot audio should reach FreeSWITCH at the channel's rate (8000 for G.711,
+    16000 for G.722, 48000 for Opus): FreeSWITCH resamples each played file on
+    its own, which adds artefacts at every block seam. The simplest setup runs
+    the pipeline output at that rate (``PipelineParams.audio_out_sample_rate``),
+    so nothing is resampled at all.
 
     mod_audio_stream only writes each ``streamAudio`` block to a file and raises
     an event; it does not play it. The serializer therefore drives the channel
@@ -54,9 +65,21 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         """Configuration parameters for FreeSWITCHFrameSerializer.
 
         Parameters:
-            freeswitch_sample_rate: Sample rate of the stream, as given to
-                ``uuid_audio_stream`` (``8k`` → 8000, ``16k`` → 16000). Used for
-                both directions. Defaults to 8000.
+            freeswitch_sample_rate: Default sample rate for both directions.
+                Defaults to 8000.
+            freeswitch_in_sample_rate: Rate of the caller audio, as given to
+                ``uuid_audio_stream`` (``8k`` → 8000, ``16k`` → 16000). Defaults
+                to ``freeswitch_sample_rate``.
+            freeswitch_out_sample_rate: Rate of the bot audio sent in
+                ``streamAudio``: 8000, 16000, 24000, 32000 (raw) or 48000 (WAV).
+                Should match the channel rate. Defaults to the pipeline output
+                rate when that is one of these, so no resampling happens;
+                otherwise to ``freeswitch_sample_rate``.
+            output_resampler_quality: SOXR quality used when bot audio must be
+                resampled. Defaults to "QQ", the only preset that holds back no
+                audio: higher presets keep up to ~110 ms inside the resampler,
+                and the end of each utterance would be lost because nothing
+                flushes it.
             sample_rate: Optional override for the pipeline input sample rate.
             auto_hang_up: Whether to hang up the call on EndFrame or CancelFrame.
             hang_up_timeout_secs: Maximum time to wait on EndFrame for queued
@@ -65,6 +88,9 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         """
 
         freeswitch_sample_rate: int = 8000
+        freeswitch_in_sample_rate: int | None = None
+        freeswitch_out_sample_rate: int | None = None
+        output_resampler_quality: SoxrQuality = "QQ"
         sample_rate: int | None = None
         auto_hang_up: bool = True
         hang_up_timeout_secs: float = 30.0
@@ -92,29 +118,38 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
                 ``esl_*`` arguments.
 
         Raises:
-            ValueError: If ``freeswitch_sample_rate`` is not supported by mod_audio_stream.
+            ValueError: If a sample rate is not supported by mod_audio_stream.
         """
         params = params or FreeSWITCHFrameSerializer.InputParams()
         super().__init__(params)
         self._params: FreeSWITCHFrameSerializer.InputParams = params
 
-        if self._params.freeswitch_sample_rate not in _RAW_SAMPLE_RATES:
+        self._in_sample_rate = (
+            self._params.freeswitch_in_sample_rate or self._params.freeswitch_sample_rate
+        )
+        # Resolved in setup() when not given, from the pipeline output rate.
+        self._out_sample_rate = self._params.freeswitch_out_sample_rate or 0
+        if self._in_sample_rate <= 0 or self._in_sample_rate % 8000:
             raise ValueError(
-                f"freeswitch_sample_rate must be one of {_RAW_SAMPLE_RATES}, "
-                f"got {self._params.freeswitch_sample_rate}"
+                f"freeswitch_in_sample_rate must be a multiple of 8000, got {self._in_sample_rate}"
+            )
+        if self._out_sample_rate and self._out_sample_rate not in _OUT_SAMPLE_RATES:
+            raise ValueError(
+                f"freeswitch_out_sample_rate must be one of {_OUT_SAMPLE_RATES}, "
+                f"got {self._out_sample_rate}"
             )
 
         self._call_uuid = call_uuid
         self._control = control or FreeSWITCHControl(esl_host, esl_port, esl_password)
 
-        self._freeswitch_sample_rate = self._params.freeswitch_sample_rate
         self._sample_rate = 0  # Pipeline input rate
 
         self._input_resampler = create_stream_resampler(
             clear_after_secs=self._params.resampler_clear_after_secs
         )
-        self._output_resampler = create_stream_resampler(
-            clear_after_secs=self._params.resampler_clear_after_secs
+        self._output_resampler = SOXRStreamAudioResampler(
+            quality=self._params.output_resampler_quality,
+            clear_after_secs=self._params.resampler_clear_after_secs,
         )
 
         self._sent_messages = (
@@ -137,6 +172,16 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             setup: Configuration object containing setup parameters.
         """
         self._sample_rate = self._params.sample_rate or setup.audio_in_sample_rate
+        if not self._out_sample_rate:
+            pipeline_out = setup.audio_out_sample_rate
+            if pipeline_out in _OUT_SAMPLE_RATES:
+                self._out_sample_rate = pipeline_out
+            else:
+                self._out_sample_rate = self._params.freeswitch_sample_rate
+                logger.warning(
+                    f"{self}: pipeline output rate {pipeline_out} cannot be played by FreeSWITCH, "
+                    f"resampling bot audio to {self._out_sample_rate}"
+                )
         if self._call_uuid and not self._control.started:
             await self._control.start(self._call_uuid)
 
@@ -162,7 +207,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             return None
         elif isinstance(frame, AudioRawFrame):
             audio = await self._output_resampler.resample(
-                frame.audio, frame.sample_rate, self._freeswitch_sample_rate
+                frame.audio, frame.sample_rate, self._out_sample_rate
             )
             if not self._control.started:
                 # Nobody would play it yet: keep it and send it with the next block.
@@ -175,12 +220,17 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
                 return None
 
             self._sent_messages += 1
+            if self._out_sample_rate in _WAV_SAMPLE_RATES:
+                audio_type = "wav"
+                audio = pcm_to_wav(audio, self._out_sample_rate, 1)
+            else:
+                audio_type = "raw"
             return json.dumps(
                 {
                     "type": "streamAudio",
                     "data": {
-                        "audioDataType": "raw",
-                        "sampleRate": self._freeswitch_sample_rate,
+                        "audioDataType": audio_type,
+                        "sampleRate": self._out_sample_rate,
                         "audioData": base64.b64encode(audio).decode("utf-8"),
                     },
                 }
@@ -204,7 +254,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         """
         if isinstance(data, bytes):
             audio = await self._input_resampler.resample(
-                data, self._freeswitch_sample_rate, self._sample_rate
+                data, self._in_sample_rate, self._sample_rate
             )
             if not audio:
                 return None

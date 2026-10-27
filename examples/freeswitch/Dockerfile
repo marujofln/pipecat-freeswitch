@@ -36,6 +36,7 @@ dialplans/mod_dialplan_xml
 applications/mod_commands
 applications/mod_dptools
 applications/mod_expr
+codecs/mod_opus
 formats/mod_native_file
 formats/mod_sndfile
 formats/mod_tone_stream

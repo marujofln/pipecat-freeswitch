@@ -50,9 +50,11 @@ from pipecat_freeswitch import FreeSWITCHFrameSerializer
 
 load_dotenv(override=True)
 
-# Must match the rate given to uuid_audio_stream ("8k"). Running the pipeline at the same rate
-# avoids resampling in both directions.
-SAMPLE_RATE = 8000
+# Caller audio: the rate given to uuid_audio_stream ("8k" -> 8000, "16k" -> 16000).
+STREAM_RATE = 8000
+# Bot audio: the channel's codec rate, so neither the serializer nor FreeSWITCH resamples it.
+# 8000 for PCMU/PCMA. For Opus use STREAM_RATE = 16000 ("16k") and OUTPUT_RATE = 48000.
+OUTPUT_RATE = 8000
 
 app = FastAPI()
 
@@ -74,7 +76,7 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
         esl_host=os.getenv("FREESWITCH_ESL_HOST", "127.0.0.1"),
         esl_port=int(os.getenv("FREESWITCH_ESL_PORT", "8021")),
         esl_password=os.getenv("FREESWITCH_ESL_PASSWORD", "ClueCon"),
-        params=FreeSWITCHFrameSerializer.InputParams(freeswitch_sample_rate=SAMPLE_RATE),
+        params=FreeSWITCHFrameSerializer.InputParams(freeswitch_in_sample_rate=STREAM_RATE),
     )
 
     transport = FastAPIWebsocketTransport(
@@ -129,7 +131,7 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
 
     worker = PipelineWorker(
         pipeline,
-        params=PipelineParams(audio_in_sample_rate=SAMPLE_RATE, audio_out_sample_rate=SAMPLE_RATE),
+        params=PipelineParams(audio_in_sample_rate=STREAM_RATE, audio_out_sample_rate=OUTPUT_RATE),
     )
 
     @transport.event_handler("on_client_connected")

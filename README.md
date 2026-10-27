@@ -107,7 +107,10 @@ the event socket is ready. Reading it yourself, as above, lets the serializer co
 
 | `InputParams` field | Default | Meaning |
 |---|---|---|
-| `freeswitch_sample_rate` | `8000` | Rate given to `uuid_audio_stream` (`8k` or `16k`), used in both directions |
+| `freeswitch_sample_rate` | `8000` | Default rate for both directions |
+| `freeswitch_in_sample_rate` | `freeswitch_sample_rate` | Caller audio rate, as given to `uuid_audio_stream` (`8k`, `16k`) |
+| `freeswitch_out_sample_rate` | pipeline output rate | Bot audio rate: 8000, 16000, 24000, 32000 (raw) or 48000 (sent as WAV) |
+| `output_resampler_quality` | `"QQ"` | SOXR preset used only if bot audio must be resampled |
 | `sample_rate` | `None` | Override for the pipeline input rate |
 | `auto_hang_up` | `True` | Hang up on `EndFrame` (after playback) and `CancelFrame` (at once) |
 | `hang_up_timeout_secs` | `30.0` | Maximum wait for queued audio on `EndFrame` |
@@ -115,12 +118,31 @@ the event socket is ready. Reading it yourself, as above, lets the serializer co
 Constructor: `call_uuid`, `esl_host` (`127.0.0.1`), `esl_port` (`8021`), `esl_password` (`ClueCon`), `params`, and
 optionally `control` (a `FreeSWITCHControl` to use instead of one built from the `esl_*` arguments).
 
+### Sample rates and codecs
+
+Send bot audio **at the channel's rate**: FreeSWITCH resamples each played file on its own, which leaves an artefact
+at every block seam (on the bench, 71 glitchy 10 ms windows out of 286 with 40 ms blocks, against 0 at the channel
+rate). The simplest setup runs the pipeline output at that rate, so nothing is resampled anywhere:
+
+| Channel codec | `uuid_audio_stream` | `PipelineParams` | Serializer |
+|---|---|---|---|
+| PCMU / PCMA | `mono 8k` | `audio_in_sample_rate=8000, audio_out_sample_rate=8000` | `freeswitch_in_sample_rate=8000` |
+| Opus (48 kHz inside FreeSWITCH) | `mono 16k` | `audio_in_sample_rate=16000, audio_out_sample_rate=48000` | `freeswitch_in_sample_rate=16000` |
+| G.722 | `mono 16k` | `audio_in_sample_rate=16000, audio_out_sample_rate=16000` | `freeswitch_in_sample_rate=16000` |
+
+- **Caller audio** is resampled by mod_audio_stream from the channel rate to the stream rate. With Opus, `16k` keeps
+  wideband speech for STT and VAD (Silero accepts 8 or 16 kHz); `8k` throws Opus's extra bandwidth away.
+- **Bot audio** at 48 kHz is sent as WAV, because FreeSWITCH plays raw audio only at 8, 16, 24 and 32 kHz.
+- If the pipeline output rate differs from `freeswitch_out_sample_rate`, the serializer resamples with SOXR "QQ":
+  higher presets hold back up to ~110 ms, and since nothing flushes the resampler after an utterance, its end would
+  be lost. "QQ" has the weakest anti-aliasing; prefer letting the TTS produce the channel rate.
+
 ### Choosing the block size
 
 Each output chunk of the transport (`audio_out_10ms_chunks` × 10 ms) becomes one `streamAudio` message, one temporary
 file and one `playback` in FreeSWITCH. Smaller blocks cut latency; larger blocks cut per-file overhead. On the bench,
-40 ms and 200 ms blocks both played gaplessly with first audio about 25–40 ms after the message was sent. Running the
-pipeline at the stream rate (`8000` for `8k`) avoids resampling.
+40 ms and 200 ms blocks both played gaplessly at the channel rate, with first audio 50–150 ms after the bot queued it;
+FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks against 0.55–0.85 s with 200 ms blocks.
 
 ### Known limitations
 
@@ -168,7 +190,7 @@ The bench README documents the phase 0 measurements that shaped the design: why 
 ## Tested versions
 
 Pipecat 1.14.0, FreeSWITCH 1.11.3 (phase 0 results also reproduced on 1.10.12), mod_audio_stream `da8b068`
-(community edition), Python 3.12.
+(community edition), Python 3.12. Codecs tested end to end: PCMU and Opus.
 
 ## License
 

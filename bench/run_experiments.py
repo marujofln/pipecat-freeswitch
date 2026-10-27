@@ -80,6 +80,7 @@ class Bench:
     out_rate: int = 16000
     endpoint: str = "loopback"
     extension: str = "9999"
+    codec: str | None = None  # absolute_codec_string for the call, e.g. "OPUS" or "PCMU"
     events: list[dict] = field(default_factory=list)
 
     async def collect_events(self) -> None:
@@ -151,8 +152,9 @@ class Bench:
         })
         call = Call(caller_uuid=str(uuidlib.uuid4()))
         since = time.time()
+        codec = f",absolute_codec_string={self.codec}" if self.codec else ""
         await self.conn.api(
-            f"originate {{origination_uuid={call.caller_uuid},RECORD_READ_ONLY=true}}"
+            f"originate {{origination_uuid={call.caller_uuid},RECORD_READ_ONLY=true{codec}}}"
             f"{DIAL_STRINGS[self.endpoint].format(extension=self.extension)} "
             "&endless_playback(tone_stream://%(500,500,1000))"
         )

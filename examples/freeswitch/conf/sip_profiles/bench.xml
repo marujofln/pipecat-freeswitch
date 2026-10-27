@@ -9,7 +9,8 @@
     <param name="dialplan" value="XML"/>
     <param name="context" value="default"/>
     <param name="auth-calls" value="false"/>
-    <param name="inbound-codec-prefs" value="$${global_codec_prefs}"/>
-    <param name="outbound-codec-prefs" value="$${global_codec_prefs}"/>
+    <!-- The runner picks the codec per call with absolute_codec_string; accept all of these. -->
+    <param name="inbound-codec-prefs" value="OPUS,PCMU,PCMA"/>
+    <param name="outbound-codec-prefs" value="OPUS,PCMU,PCMA"/>
   </settings>
 </profile>

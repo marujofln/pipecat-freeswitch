@@ -40,6 +40,28 @@ Results on 2026-10-27 (SIP, 8 kHz):
 
 The 80 ms missing are the bench's receiving FreeSWITCH (see the talkspurt section below), not the serializer.
 
+**Codecs and rates** (`run_e2e.py --codec ... --in-rate ... --out-rates ... --pipeline-out-rate ...`, 3 s tone).
+"Glitch" = a 10 ms window of the caller's recording where a fitted 440 Hz sine leaves a residual above −20 dB;
+windows next to silence are skipped.
+
+| Codec | Pipeline → sent | Who resamples | Glitches, 40 ms / 200 ms blocks | Residual (median) | FreeSWITCH CPU, 40 / 200 ms |
+|---|---|---|---:|---:|---:|
+| PCMU | 8k → 8k | nobody | 0 / 0 | −39.6 dB | 1.03 / 0.61 s |
+| PCMU | 24k → 8k | serializer (SOXR QQ) | 0 / 0 | −39.6 dB | 1.04–1.27 / 0.55 s |
+| PCMU | 16k → 16k | FreeSWITCH, per file | 71 / 13 | −39.6 dB | 1.02 / 0.61 s |
+| Opus | 48k → 48k (WAV) | nobody | 3 / 2 | −50.7 dB | 1.33 / 0.84 s |
+| Opus | 24k → 48k (WAV) | serializer (SOXR QQ) | 5 / 9 | −50.7 dB | 1.32 / 0.87 s |
+| Opus | 16k → 16k | FreeSWITCH, per file | 72 / 19 | −29.2 / −48.4 dB | 1.47 / 0.81 s |
+
+- Opus runs at 48 kHz inside FreeSWITCH (`opus/48000`); mod_audio_stream resamples caller audio 48k → 16k for a
+  `16k` stream.
+- FreeSWITCH resampling each file adds artefacts at the seams, in proportion to the number of blocks. Send bot audio at
+  the channel rate.
+- One 40 ms PCMU 24k → 8k call had 14 holes; three reruns had the usual 2, so it is counted as an outlier.
+- The first version of this matrix used Pipecat's default SOXR "VHQ" stream resampler in the serializer: it released
+  audio in bursts and held back up to ~110 ms at the end of each utterance. That is why the serializer now uses "QQ".
+- `.r48` files fail with `Invalid file format [r48]`: mod_sndfile plays raw audio only at 8, 16, 24 and 32 kHz.
+
 By default the runner places real SIP/RTP (PCMU) calls from FreeSWITCH to itself through the bench-only `bench`
 profile (127.0.0.1:5090, no auth, not reachable from the network). The caller leg plays a 1 kHz tone and records
 what it hears; the dialplan leg streams to the echo server. Results go to `captures/results-<timestamp>.json`.

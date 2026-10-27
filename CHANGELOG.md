@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `freeswitch_in_sample_rate` and `freeswitch_out_sample_rate`: separate stream rates per direction, e.g. 16 kHz
+  caller audio and 48 kHz bot audio on Opus channels.
+- Bot audio at 48 kHz is sent as WAV (FreeSWITCH plays raw audio only at 8, 16, 24 and 32 kHz).
+- `output_resampler_quality` (default "QQ").
+
+### Changed
+
+- `freeswitch_out_sample_rate` defaults to the pipeline output rate when FreeSWITCH can play it, so bot audio is
+  not resampled. 64 kHz is no longer accepted.
+
+### Fixed
+
+- Bot audio resampled by the serializer lost the end of each utterance: the default SOXR "VHQ" stream resampler
+  holds back up to ~110 ms, which nothing flushes, and clears it after 0.2 s of inactivity. Output resampling now
+  uses "QQ", which holds back nothing.
+
 ## [0.1.0] - 2026-10-27
 
 ### Added

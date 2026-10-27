@@ -1,6 +1,6 @@
 """End-to-end test bot: a real Pipecat pipeline with FreeSWITCHFrameSerializer, no AI services.
 
-Dial extension 9998 (dialplan: ``uuid_audio_stream ... ws://127.0.0.1:8766/ws mono 8k ${uuid}``). The bot
+Dial extension 9998 (``uuid_audio_stream ... ws://127.0.0.1:8766/ws mono 8k ${uuid}``) or 9997 (``16k``). The bot
 counts the caller audio it receives and plays a tone, then, depending on the scenario set with
 ``POST /config``:
 
@@ -38,7 +38,6 @@ from pydantic import BaseModel
 from pipecat_freeswitch import FreeSWITCHFrameSerializer
 
 PORT = int(os.environ.get("BOT_PORT", "8766"))
-RATE = 8000  # "mono 8k" in the dialplan; pipeline runs at the same rate, so nothing is resampled
 CAPTURE_DIR = os.environ.get(
     "CAPTURE_DIR", os.path.join(os.path.dirname(__file__), "..", "examples/freeswitch/captures")
 )
@@ -51,6 +50,12 @@ class BotConfig(BaseModel):
     tone_seconds: float = 3.0
     interrupt_after_s: float = 1.5
     audio_out_10ms_chunks: int = 4
+    # Stream rate given to uuid_audio_stream: 8000 for extension 9998, 16000 for 9997.
+    in_rate: int = 8000
+    # Rate of the streamAudio blocks sent to FreeSWITCH (freeswitch_out_sample_rate).
+    out_rate: int = 8000
+    # Pipeline output rate (the "TTS" rate); the serializer resamples it to out_rate.
+    pipeline_out_rate: int = 8000
 
 
 app = FastAPI()
@@ -64,13 +69,15 @@ def log_event(uuid: str, kind: str, **fields) -> None:
         f.write(line + "\n")
 
 
-def tone_frames(seconds: float) -> list[OutputAudioRawFrame]:
+def tone_frames(seconds: float, rate: int) -> list[OutputAudioRawFrame]:
     """A 440 Hz tone as 20 ms output frames."""
-    samples = int(seconds * RATE)
-    pcm = array.array("h", (int(8000 * math.sin(2 * math.pi * 440 * i / RATE)) for i in range(samples)))
-    step = RATE // 50
+    samples = int(seconds * rate)
+    pcm = array.array(
+        "h", (int(8000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(samples))
+    )
+    step = rate // 50
     return [
-        OutputAudioRawFrame(audio=pcm[i : i + step].tobytes(), sample_rate=RATE, num_channels=1)
+        OutputAudioRawFrame(audio=pcm[i : i + step].tobytes(), sample_rate=rate, num_channels=1)
         for i in range(0, samples, step)
     ]
 
@@ -108,7 +115,11 @@ async def ws_endpoint(websocket: WebSocket):
     log_event(uuid, "connected", config=scenario.model_dump())
 
     serializer = FreeSWITCHFrameSerializer(
-        call_uuid=uuid, params=FreeSWITCHFrameSerializer.InputParams(freeswitch_sample_rate=RATE)
+        call_uuid=uuid,
+        params=FreeSWITCHFrameSerializer.InputParams(
+            freeswitch_in_sample_rate=scenario.in_rate,
+            freeswitch_out_sample_rate=scenario.out_rate,
+        ),
     )
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
@@ -123,12 +134,14 @@ async def ws_endpoint(websocket: WebSocket):
     counter = InputCounter()
     worker = PipelineWorker(
         Pipeline([transport.input(), counter, transport.output()]),
-        params=PipelineParams(audio_in_sample_rate=RATE, audio_out_sample_rate=RATE),
+        params=PipelineParams(
+            audio_in_sample_rate=scenario.in_rate, audio_out_sample_rate=scenario.pipeline_out_rate
+        ),
     )
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        frames = tone_frames(scenario.tone_seconds)
+        frames = tone_frames(scenario.tone_seconds, scenario.pipeline_out_rate)
         log_event(uuid, "tone_queued", seconds=scenario.tone_seconds, frames=len(frames))
         if scenario.scenario == "speak_end":
             await worker.queue_frames([*frames, EndFrame()])

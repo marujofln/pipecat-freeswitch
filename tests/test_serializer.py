@@ -24,8 +24,8 @@ from pipecat_freeswitch import FreeSWITCHControl, FreeSWITCHFrameSerializer
 
 UUID = "11111111-2222-3333-4444-555555555555"
 
-# Only audio_in_sample_rate is read by the serializer.
-SETUP = SimpleNamespace(audio_in_sample_rate=16000)
+# Only the sample rates are read by the serializer.
+SETUP = SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=8000)
 
 
 def make_serializer(esl_server, call_uuid=UUID, **params) -> FreeSWITCHFrameSerializer:
@@ -111,7 +111,7 @@ async def test_bot_audio_becomes_stream_audio(esl_server):
 
 
 async def test_bot_audio_is_resampled_to_freeswitch_rate(esl_server):
-    serializer = make_serializer(esl_server, freeswitch_sample_rate=16000)
+    serializer = make_serializer(esl_server, freeswitch_out_sample_rate=16000)
     await serializer.setup(SETUP)
     sizes = []
     for _ in range(25):
@@ -145,10 +145,63 @@ async def test_unknown_frames_and_messages_are_ignored(esl_server):
     await serializer.serialize(CancelFrame())
 
 
+async def test_separate_in_and_out_rates(esl_server):
+    # Opus channel: caller audio streamed at 16 kHz, bot audio sent at the channel's 48 kHz.
+    serializer = make_serializer(
+        esl_server, freeswitch_in_sample_rate=16000, freeswitch_out_sample_rate=48000
+    )
+    await serializer.setup(SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=24000))
+    frame = await serializer.deserialize(silence(20, 16000))
+    assert frame.sample_rate == 16000 and len(frame.audio) == 640  # no resampling
+    message = json.loads(await serializer.serialize(audio_frame(20, 48000)))
+    assert message["data"]["sampleRate"] == 48000
+    # FreeSWITCH cannot play raw audio at 48 kHz (.r48), so it goes as WAV.
+    assert message["data"]["audioDataType"] == "wav"
+    wav = base64.b64decode(message["data"]["audioData"])
+    assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE" and len(wav) == 44 + 1920
+    await serializer.serialize(CancelFrame())
+
+
+async def test_output_rate_defaults_to_pipeline_rate(esl_server):
+    serializer = make_serializer(esl_server)
+    await serializer.setup(SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=24000))
+    message = json.loads(await serializer.serialize(audio_frame(40, 24000)))
+    assert message["data"]["sampleRate"] == 24000 and message["data"]["audioDataType"] == "raw"
+    assert len(base64.b64decode(message["data"]["audioData"])) == 1920  # passed through as is
+    await serializer.serialize(CancelFrame())
+
+
+async def test_unplayable_pipeline_rate_falls_back(esl_server):
+    serializer = make_serializer(esl_server, freeswitch_sample_rate=8000)
+    await serializer.setup(SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=22050))
+    message = json.loads(await serializer.serialize(audio_frame(40, 22050)))
+    assert message["data"]["sampleRate"] == 8000
+    await serializer.serialize(CancelFrame())
+
+
+async def test_resampling_holds_back_no_audio(esl_server):
+    # Nothing flushes the resampler after the last frame of an utterance, so it must not keep any.
+    serializer = make_serializer(esl_server, freeswitch_out_sample_rate=8000)
+    await serializer.setup(SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=24000))
+    sent = 0
+    for _ in range(25):  # 1 s of 40 ms frames at 24 kHz
+        message = json.loads(await serializer.serialize(audio_frame(40, 24000)))
+        sent += len(base64.b64decode(message["data"]["audioData"]))
+    assert abs(sent - 16000) <= 2 * 8  # 1 s at 8 kHz, within a millisecond
+    await serializer.serialize(CancelFrame())
+
+
+def test_rejects_unsupported_input_rate():
+    with pytest.raises(ValueError):
+        FreeSWITCHFrameSerializer(
+            params=FreeSWITCHFrameSerializer.InputParams(freeswitch_in_sample_rate=11025)
+        )
+
+
 def test_rejects_unsupported_sample_rate():
     with pytest.raises(ValueError):
         FreeSWITCHFrameSerializer(
-            params=FreeSWITCHFrameSerializer.InputParams(freeswitch_sample_rate=11025)
+            params=FreeSWITCHFrameSerializer.InputParams(freeswitch_out_sample_rate=64000)
         )
 
 

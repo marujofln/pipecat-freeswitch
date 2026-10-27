@@ -19,5 +19,13 @@
         <action application="park"/>
       </condition>
     </extension>
+    <!-- 9997: same bot, caller audio streamed at 16 kHz (wideband codecs such as Opus). -->
+    <extension name="pipecat_bot_16k">
+      <condition field="destination_number" expression="^9997$">
+        <action application="answer"/>
+        <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8766/ws mono 16k ${uuid})}"/>
+        <action application="park"/>
+      </condition>
+    </extension>
   </context>
 </include>
