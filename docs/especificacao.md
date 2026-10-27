@@ -125,13 +125,21 @@ Pontos de atenção:
   (`audio_streamer_glue.cpp:430`); o serializer conta os `streamAudio` enviados e, no break, descarta eventos `play`
   com `n` menor que a contagem. Depende de detalhe interno do módulo (teste de regressão + versão fixada); uma
   mensagem com erro de decodificação não incrementa `n`.
-- **Fila esvaziando com envio no ritmo real (não medido).** A bancada mandou o áudio em rajada. Com o pacing do
-  transport, o bloco *i+1* fica pronto `chunk_ms` depois do *i* e começa a tocar no instante em que o *i* termina:
-  margem zero, qualquer atraso vira silêncio, e piora com blocos pequenos. Mitigação provável: segurar o primeiro
-  bloco até ter folga (ex.: 1 bloco extra). Medir antes de escrever o chunker.
-- **`uuid_kill` no `EndFrame` corta o fim da fala.** Quando o Pipecat entrega o último frame, o FreeSWITCH ainda tem
-  o último bloco (e a fila) para tocar; kill imediato corta as últimas palavras. O controle espera o
-  `CHANNEL_EXECUTE_COMPLETE` do último arquivo antes do `uuid_kill`.
+- **Fila esvaziando com envio no ritmo real (medido em SIP, 2026-10-27).** Com blocos de 40–200 ms e atraso aleatório
+  de até 50 ms: 0–1 underrun por chamada, ~20 ms cada. A fila se autocorrige (depois de um bloco atrasado, a
+  reprodução segue atrasada e ganha margem), então o silêncio total fica limitado ao maior atraso da chamada.
+  Prebuffer de 1 bloco elimina quase todos (falha só quando o atraso passa do tamanho do bloco), ao custo de
+  1 bloco de latência. Decisão para o chunker: prebuffer de 1 bloco configurável, padrão ligado.
+- **`uuid_kill` no `EndFrame` corta o fim da fala (confirmado).** Kill imediato após o último bloco: o último arquivo
+  nem começou e 240 ms de fala foram cortados (blocos de 200 ms). Esperando o `CHANNEL_EXECUTE_COMPLETE` do último
+  arquivo: nada cortado, hang-up 270 ms após o último bloco. O controle precisa esperar (com timeout).
+- **Perda de ~40 ms no início de cada trecho de fala (SIP, em aberto).** Quando a reprodução começa depois de silêncio,
+  o chamador perde ~40 ms logo após os primeiros 20 ms. Na bancada o receptor também é o FreeSWITCH, então ainda não
+  se sabe se a perda é no envio ou na recepção. Precisa de receptor RTP externo (pjsua ou captura de pacotes).
+  Cada underrun vira ~60 ms audíveis por causa disso.
+- **Bancada com `mod_loopback`:** perde o último quadro de 20 ms de cada arquivo em sequência (o `playback` manda
+  audio sync ao começar e o loopback limpa a fila de saída). É artefato do loopback; medições de áudio devem usar SIP
+  (`--endpoint sip`, padrão).
 - **`BotStoppedSpeakingFrame` cedo:** chega até um bloco antes do fim real do áudio. Efeito pequeno na detecção de
   turno; documentar.
 - **Hang-up:** `uuid_kill` derruba o canal em ~20 ms e a WebSocket fecha em ~17 ms. O módulo não dispara

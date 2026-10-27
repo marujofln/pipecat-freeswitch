@@ -12,8 +12,13 @@ Experiments:
 - ``latency``: ``streamAudio`` block size vs time to first audio, file count and gaps between files.
 - ``break``:   ``uuid_break`` with and without ``all`` while several files are queued.
 - ``kill``:    ``uuid_kill`` over ESL, time until hang-up and WebSocket close.
+- ``pacing``:  blocks sent in real time (as a paced pipeline would), with jitter and an optional prebuffer:
+  does the playback queue run dry between blocks?
+- ``hangup``:  ``uuid_kill`` right after the last block vs after the last file finished playing:
+  how much of the end of the speech is cut off?
 
-Each call: the caller leg (``loopback/9999``) plays a 1 kHz tone and records what it hears
+Each call (``--endpoint sip``, the default: a real SIP/RTP call from FreeSWITCH to itself through the
+bench-only profile on 127.0.0.1:5090; or ``--endpoint loopback``): the caller leg plays a 1 kHz tone and records what it hears
 (``captures/<caller>-caller.wav``); the dialplan leg streams to the echo server, which logs to
 ``captures/<leg>.jsonl``. Results are printed and written to ``captures/results-<timestamp>.json``.
 """
@@ -39,7 +44,14 @@ SUBSCRIPTIONS = (
     "CUSTOM mod_audio_stream::connect mod_audio_stream::disconnect "
     "mod_audio_stream::error mod_audio_stream::play"
 )
-SILENCE_RMS = 300  # 20 ms windows below this are treated as silence
+SILENCE_RMS = 300  # 10 ms windows below this are treated as silence
+WINDOW_S = 0.010
+# loopback: no RTP, but mod_loopback drops queued frames on every playback start (audio sync).
+# sip: real SIP/RTP (PCMU) through the bench-only profile on 127.0.0.1:5090.
+DIAL_STRINGS = {
+    "loopback": "loopback/9999/default",
+    "sip": "sofia/bench/9999@127.0.0.1:5090",
+}
 
 
 def event_time(event: dict) -> float:
@@ -65,6 +77,8 @@ class Bench:
     echo_url: str
     captures: Path
     play_method: str = "sendmsg"
+    out_rate: int = 16000
+    endpoint: str = "loopback"
     events: list[dict] = field(default_factory=list)
 
     async def collect_events(self) -> None:
@@ -74,7 +88,7 @@ class Bench:
         so all timings use the arrival time instead, on the same clock as the echo server's logs.
         """
         while True:
-            event = await self.conn.events.get()
+            event = await self.conn.next_event()
             event["_t"] = time.time()
             self.events.append(event)
 
@@ -123,17 +137,22 @@ class Bench:
         """Async wrapper around ``http``."""
         return await asyncio.to_thread(self.http, method, path, body)
 
-    async def place_call(self, mode: str, chunk_ms: int, tone_seconds: float = 3.0) -> Call:
-        """Configure the echo server, originate a loopback call to 9999 and start recording."""
+    async def place_call(
+        self, mode: str, chunk_ms: int, tone_seconds: float = 3.0, **config: object
+    ) -> Call:
+        """Configure the echo server, originate a loopback call to 9999 and start recording.
+
+        Extra keyword arguments are passed to the echo server's ``/config`` (``paced``, ``jitter_ms``, ...).
+        """
         await self.echo_api("POST", "/config", {
             "mode": mode, "chunk_ms": chunk_ms, "tone_seconds": tone_seconds,
-            "play_method": self.play_method,
+            "play_method": self.play_method, "out_rate": self.out_rate, **config,
         })
         call = Call(caller_uuid=str(uuidlib.uuid4()))
         since = time.time()
         await self.conn.api(
             f"originate {{origination_uuid={call.caller_uuid},RECORD_READ_ONLY=true}}"
-            "loopback/9999/default &endless_playback(tone_stream://%(500,500,1000))"
+            f"{DIAL_STRINGS[self.endpoint]} &endless_playback(tone_stream://%(500,500,1000))"
         )
         call.leg_uuid = await self.wait_for_connect(since)
         call.recording = f"/captures/{call.caller_uuid}-caller.wav"
@@ -176,18 +195,24 @@ class Bench:
             samples = array.array("h", w.readframes(w.getnframes()))
         if width != 2:
             raise ValueError(f"unexpected sample width {width}")
-        window = rate * channels // 50  # 20 ms
+        window = int(rate * channels * WINDOW_S)
         spans: list[tuple[float, float]] = []
         for i in range(0, len(samples) - window + 1, window):
             chunk = samples[i : i + window]
             rms = math.sqrt(sum(s * s for s in chunk) / len(chunk))
             t = call.record_start + i / (rate * channels)
             if rms >= SILENCE_RMS:
-                if spans and t - spans[-1][1] <= 0.021:
-                    spans[-1] = (spans[-1][0], t + 0.02)
+                # Merge only adjacent windows: a single silent window is a real hole.
+                if spans and t - spans[-1][1] < WINDOW_S / 2:
+                    spans[-1] = (spans[-1][0], t + WINDOW_S)
                 else:
-                    spans.append((t, t + 0.02))
+                    spans.append((t, t + WINDOW_S))
         return spans
+
+    def holes(self, call: Call) -> list[float]:
+        """Durations (s) of the silent holes between audible spans heard by the caller."""
+        spans = self.audible_spans(call)
+        return [b[0] - a[1] for a, b in zip(spans, spans[1:])]
 
 
 def ms(seconds: float | None) -> float | None:
@@ -258,6 +283,8 @@ async def experiment_latency(bench: Bench, chunk_ms: int, tone_seconds: float = 
         "gap_between_files": describe(gaps),
         "heard_s": round(heard_total, 2),
         "heard_segments": len(heard),
+        "holes_heard": len(bench.holes(call)),
+        "holes_heard_ms": ms(sum(bench.holes(call))),
     }
 
 
@@ -307,14 +334,89 @@ async def experiment_kill(bench: Bench) -> dict:
     }
 
 
+def tone_start(log: list[dict]) -> float | None:
+    """Wall time at which the echo server started producing the tone."""
+    return next((e["wall"] for e in log if e["kind"] == "tone_start"), None)
+
+
+async def experiment_pacing(
+    bench: Bench, chunk_ms: int, jitter_ms: float, prebuffer: int, tone_seconds: float = 3.0
+) -> dict:
+    """Real-time paced blocks: count playback underruns (queue empty when a file ends)."""
+    call = await bench.place_call(
+        "tone", chunk_ms, tone_seconds, paced=True, jitter_ms=jitter_ms, prebuffer_blocks=prebuffer,
+        start_delay_s=0.5, seed=chunk_ms * 1000 + int(jitter_ms),
+    )
+    await asyncio.sleep(0.5 + tone_seconds + (prebuffer * chunk_ms + jitter_ms) / 1000 + 1.5)
+    await bench.hang_up(call)
+    log = bench.capture(call.leg_uuid)
+    pbs = bench.playbacks(call.leg_uuid)
+    finished = [(s, e) for s, e in pbs if e is not None]
+    gaps = [pbs[i + 1][0] - finished[i][1] for i in range(min(len(finished), len(pbs) - 1))]
+    underruns = [g for g in gaps if g > 0.010]
+    heard = bench.audible_spans(call)
+    start = tone_start(log)
+    return {
+        "chunk_ms": chunk_ms,
+        "jitter_ms": jitter_ms,
+        "prebuffer_blocks": prebuffer,
+        "leg_uuid": call.leg_uuid,
+        "blocks": sum(1 for e in log if e["kind"] == "stream_audio_sent"),
+        "playbacks": len(pbs),
+        "underruns": len(underruns),
+        "underrun_silence_ms": ms(sum(underruns)),
+        "max_underrun_ms": ms(max(underruns)) if underruns else 0.0,
+        "first_audio_ms": ms(pbs[0][0] - start) if pbs and start else None,
+        "heard_segments": len(heard),
+        "heard_s": round(sum(e - s for s, e in heard), 2),
+        "holes_heard": len(bench.holes(call)),
+        "holes_heard_ms": ms(sum(bench.holes(call))),
+    }
+
+
+async def experiment_hangup(bench: Bench, mode: str, chunk_ms: int = 200, tone_seconds: float = 3.0) -> dict:
+    """Paced tone, then uuid_kill right after the last block or after the last file finished."""
+    call = await bench.place_call(
+        "tone", chunk_ms, tone_seconds, paced=True, start_delay_s=0.5, hangup=mode,
+    )
+    await asyncio.sleep(0.5 + tone_seconds + 3.0)
+    await bench.hang_up(call)
+    log = bench.capture(call.leg_uuid)
+    sent = [e["wall"] for e in log if e["kind"] == "stream_audio_sent"]
+    pbs = bench.playbacks(call.leg_uuid)
+    hangups = bench.events_for(call.leg_uuid, "CHANNEL_HANGUP_COMPLETE")
+    heard = bench.audible_spans(call)
+    heard_s = sum(e - s for s, e in heard)
+    return {
+        "hangup": mode,
+        "chunk_ms": chunk_ms,
+        "leg_uuid": call.leg_uuid,
+        "blocks": len(sent),
+        "playbacks_started": len(pbs),
+        "playbacks_finished": sum(1 for _, e in pbs if e is not None),
+        "tone_s": tone_seconds,
+        "heard_s": round(heard_s, 2),
+        "cut_off_ms": ms(max(0.0, tone_seconds - heard_s)),
+        "last_block_to_hangup_ms": ms(event_time(hangups[0]) - sent[-1]) if hangups and sent else None,
+    }
+
+
 async def main() -> None:
     """Parse arguments, run the selected experiments and save the results."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-e", "--experiments", default="input,latency,break,kill")
     parser.add_argument("--chunks", default="100,200,300,500,1000", help="block sizes (ms) for latency")
+    parser.add_argument("--pacing-chunks", default="40,100,200", help="block sizes (ms) for pacing")
+    parser.add_argument("--jitters", default="0,20,50", help="max random send delay (ms) for pacing")
+    parser.add_argument("--prebuffers", default="0,1", help="prebuffer sizes (blocks) for pacing")
     parser.add_argument(
         "--play-method", default="sendmsg", choices=["broadcast", "sendmsg"],
         help="how the echo server plays files: uuid_broadcast or ESL sendmsg execute",
+    )
+    parser.add_argument("--out-rate", type=int, default=16000, help="tone sample rate sent in streamAudio")
+    parser.add_argument(
+        "--endpoint", default="sip", choices=sorted(DIAL_STRINGS),
+        help="how calls reach extension 9999: SIP/RTP to itself, or mod_loopback",
     )
     parser.add_argument("--esl", default="127.0.0.1:8021")
     parser.add_argument("--esl-password", default="ClueCon")
@@ -326,13 +428,15 @@ async def main() -> None:
     conn = await EslConnection.connect(host, int(port), args.esl_password)
     await conn.subscribe(SUBSCRIPTIONS)
     bench = Bench(
-        conn=conn, echo_url=args.echo_url, captures=args.captures, play_method=args.play_method
+        conn=conn, echo_url=args.echo_url, captures=args.captures, play_method=args.play_method,
+        out_rate=args.out_rate, endpoint=args.endpoint,
     )
     collector = asyncio.create_task(bench.collect_events())
 
     selected = args.experiments.split(",")
     results: dict[str, object] = {
         "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "play_method": args.play_method,
+        "out_rate": args.out_rate, "endpoint": args.endpoint,
     }
     try:
         if "input" in selected:
@@ -357,6 +461,22 @@ async def main() -> None:
             print("== kill", flush=True)
             results["kill"] = await experiment_kill(bench)
             print(json.dumps(results["kill"], indent=2), flush=True)
+        if "pacing" in selected:
+            results["pacing"] = []
+            for chunk in (int(c) for c in args.pacing_chunks.split(",")):
+                for jitter in (float(j) for j in args.jitters.split(",")):
+                    for prebuffer in (int(p) for p in args.prebuffers.split(",")):
+                        print(f"== pacing: chunk_ms={chunk} jitter_ms={jitter} prebuffer={prebuffer}", flush=True)
+                        r = await experiment_pacing(bench, chunk, jitter, prebuffer)
+                        results["pacing"].append(r)
+                        print(json.dumps(r), flush=True)
+        if "hangup" in selected:
+            results["hangup"] = []
+            for mode in ("immediate", "after_playback"):
+                print(f"== hangup: {mode}", flush=True)
+                r = await experiment_hangup(bench, mode)
+                results["hangup"].append(r)
+                print(json.dumps(r, indent=2), flush=True)
     finally:
         collector.cancel()
         await conn.api("hupall")

@@ -11,15 +11,16 @@ class EslConnection:
     """One authenticated inbound ESL connection.
 
     Replies to commands and events arrive on the same socket. Events go to ``events``,
-    and command replies go to ``_replies`` in the order they arrive.
+    and command replies go to ``_replies`` in the order they arrive. When the socket closes,
+    both queues get ``None`` so that waiters raise ``ConnectionError`` instead of hanging.
     """
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self._reader = reader
         self._writer = writer
-        self._replies: asyncio.Queue[tuple[dict, str]] = asyncio.Queue()
+        self._replies: asyncio.Queue[tuple[dict, str] | None] = asyncio.Queue()
         self._lock = asyncio.Lock()
-        self.events: asyncio.Queue[dict] = asyncio.Queue()
+        self.events: asyncio.Queue[dict | None] = asyncio.Queue()
         self._reader_task: asyncio.Task | None = None
 
     @classmethod
@@ -47,7 +48,19 @@ class EslConnection:
         async with self._lock:
             self._writer.write(f"{command}\n\n".encode())
             await self._writer.drain()
-            return await self._replies.get()
+            reply = await self._replies.get()
+            if reply is None:
+                await self._replies.put(None)  # wake any other waiter too
+                raise ConnectionError("ESL connection closed")
+            return reply
+
+    async def next_event(self) -> dict:
+        """Return the next event; raise ``ConnectionError`` once the connection is closed."""
+        event = await self.events.get()
+        if event is None:
+            await self.events.put(None)
+            raise ConnectionError("ESL connection closed")
+        return event
 
     async def api(self, command: str) -> str:
         """Run a blocking ``api`` command and return its body."""
@@ -87,13 +100,21 @@ class EslConnection:
         return headers, body
 
     async def _read_loop(self) -> None:
-        while True:
-            headers, body = await self._read_message()
-            content_type = headers.get("Content-Type")
-            if content_type == "text/event-plain":
-                await self.events.put(parse_plain_event(body))
-            elif content_type in ("command/reply", "api/response"):
-                await self._replies.put((headers, body))
+        try:
+            while True:
+                headers, body = await self._read_message()
+                content_type = headers.get("Content-Type")
+                if content_type == "text/event-plain":
+                    await self.events.put(parse_plain_event(body))
+                elif content_type in ("command/reply", "api/response"):
+                    await self._replies.put((headers, body))
+                elif content_type == "text/disconnect-notice":
+                    break
+        except (OSError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            await self.events.put(None)
+            await self._replies.put(None)
 
 
 def parse_plain_event(body: str) -> dict:

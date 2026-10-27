@@ -104,7 +104,12 @@ Experiment endpoints on the echo server (commands go over ESL):
     FreeSWITCH), so 100 ms blocks play at half speed. Queuing `playback` through ESL `sendmsg` instead gives
     gapless playback and first audio 24-41 ms after `streamAudio` is sent, for blocks from 100 to 1000 ms.
   - `uuid_break` alone stops only the current file; `uuid_break <uuid> all` clears the queue (22 ms).
-  - `uuid_kill` hangs up in about 20 ms.
+  - `uuid_kill` hangs up in about 20 ms, but killing right after the last block cuts it off (240 ms with 200 ms
+    blocks); waiting for the last file's `CHANNEL_EXECUTE_COMPLETE` keeps the whole speech.
+  - With blocks sent in real time and up to 50 ms of jitter, playback underruns are rare (0-1 per call, ~20 ms);
+    a one-block prebuffer removes them.
+  - Open: over SIP, ~40 ms are lost right after the start of each talkspurt; not yet attributed to the sending or
+    the receiving side.
 
 ## Roadmap
 

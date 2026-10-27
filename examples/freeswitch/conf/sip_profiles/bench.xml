@@ -1,0 +1,15 @@
+<!-- Bench-only profile: bound to 127.0.0.1 and unauthenticated, so the experiment runner can place
+     real SIP/RTP calls from FreeSWITCH to itself (sofia/bench/9999@127.0.0.1:5090). -->
+<profile name="bench">
+  <settings>
+    <param name="sip-ip" value="127.0.0.1"/>
+    <param name="rtp-ip" value="127.0.0.1"/>
+    <param name="rtp-timer-name" value="soft"/>
+    <param name="sip-port" value="5090"/>
+    <param name="dialplan" value="XML"/>
+    <param name="context" value="default"/>
+    <param name="auth-calls" value="false"/>
+    <param name="inbound-codec-prefs" value="$${global_codec_prefs}"/>
+    <param name="outbound-codec-prefs" value="$${global_codec_prefs}"/>
+  </settings>
+</profile>

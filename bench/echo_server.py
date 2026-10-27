@@ -7,7 +7,9 @@ experiments in docs/especificacao.md (Phase 0) can be read off afterwards.
 Modes (env ``MODE``, or per call via ``POST /config``):
 
 - ``echo``: send the caller's audio back in ``chunk_ms`` blocks.
-- ``tone``: on connect, send ``tone_seconds`` of a 440 Hz tone in ``chunk_ms`` blocks, all at once.
+- ``tone``: on connect, send ``tone_seconds`` of a 440 Hz tone in ``chunk_ms`` blocks, all at once, or paced
+  like a real-time pipeline (``paced``, with optional ``jitter_ms`` and ``prebuffer_blocks``), optionally hanging
+  up afterwards (``hangup``).
 
 The open source module only writes the file and raises ``mod_audio_stream::play``; nothing plays it.
 ``run_esl_player`` subscribes to that event and queues ``playback`` on the channel (this is the
@@ -20,6 +22,7 @@ import base64
 import json
 import math
 import os
+import random
 import time
 
 import uvicorn
@@ -45,6 +48,22 @@ class CallConfig(BaseModel):
     tone_seconds: float = float(os.environ.get("TONE_SECONDS", "10"))
     # "broadcast": uuid_broadcast (adds 100 ms of lead frames per file); "sendmsg": ESL execute
     play_method: str = os.environ.get("PLAY_METHOD", "sendmsg")
+    # Tone pacing: False sends every block at once; True sends block i when it would be complete in a
+    # real-time pipeline (t0 + (i+1) * chunk_ms), plus a random delay in [0, jitter_ms].
+    paced: bool = False
+    jitter_ms: float = 0.0
+    # Hold the first blocks until this many extra blocks are ready (playback safety margin).
+    prebuffer_blocks: int = 0
+    # Delay before the tone starts, so the caller-side recording is already running.
+    start_delay_s: float = 0.0
+    # After the last block: "none", "immediate" (uuid_kill right away, like a naive EndFrame handler)
+    # or "after_playback" (uuid_kill once the last file has finished playing).
+    hangup: str = "none"
+    seed: int = 0
+    # Sample rate of the generated tone (the module writes .r8 / .r16 / ... accordingly).
+    out_rate: int = OUT_RATE
+    # "flat", or "ramp": amplitude rises linearly 10%->100% inside each block (shows which frame is lost).
+    envelope: str = "flat"
 
 
 app = FastAPI()
@@ -52,6 +71,8 @@ call_config = CallConfig()
 background_tasks: set[asyncio.Task] = set()  # asyncio keeps only weak references to tasks
 leg_configs: dict[str, CallConfig] = {}  # config in effect for each streaming leg
 esl_conn: EslConnection | None = None  # shared by the player and the control endpoints
+playbacks_done: dict[str, int] = {}  # finished playback apps per channel
+playback_changed = asyncio.Condition()
 os.makedirs(CAPTURE_DIR, exist_ok=True)
 
 
@@ -140,17 +161,55 @@ async def ws_endpoint(ws: WebSocket) -> None:
     finally:
         raw.close()
         leg_configs.pop(uuid, None)
+        playbacks_done.pop(uuid, None)
         log_event(uuid, "ws_closed", frames=frames)
 
 
 async def send_tone(ws: WebSocket, uuid: str, config: CallConfig) -> None:
-    """Send the whole tone at once in ``chunk_ms`` blocks, to see how the module queues them."""
-    pcm = tone_pcm(config.tone_seconds, OUT_RATE)
-    chunk_bytes = OUT_RATE * 2 * config.chunk_ms // 1000
-    for i in range(0, len(pcm), chunk_bytes):
-        block = pcm[i : i + chunk_bytes]
-        await ws.send_text(stream_audio_message(block, OUT_RATE))
-        log_event(uuid, "stream_audio_sent", bytes=len(block), rate=OUT_RATE)
+    """Send the tone in ``chunk_ms`` blocks, all at once or paced in real time; then maybe hang up."""
+    await asyncio.sleep(config.start_delay_s)
+    pcm = tone_pcm(config.tone_seconds, config.out_rate)
+    chunk_bytes = config.out_rate * 2 * config.chunk_ms // 1000
+    blocks = [pcm[i : i + chunk_bytes] for i in range(0, len(pcm), chunk_bytes)]
+    if config.envelope == "ramp":
+        blocks = [apply_ramp(b) for b in blocks]
+    rng = random.Random(config.seed)
+    t0 = time.monotonic()
+    log_event(uuid, "tone_start", blocks=len(blocks), paced=config.paced)
+    for i, block in enumerate(blocks):
+        if config.paced:
+            # Block i is complete at t0 + (i+1) * chunk; with a prebuffer, nothing goes out before
+            # block ``prebuffer_blocks`` is complete.
+            ready = t0 + (max(i, min(config.prebuffer_blocks, len(blocks) - 1)) + 1) * config.chunk_ms / 1000
+            send_at = ready + rng.uniform(0, config.jitter_ms) / 1000
+            await asyncio.sleep(max(0.0, send_at - time.monotonic()))
+        await ws.send_text(stream_audio_message(block, config.out_rate))
+        log_event(uuid, "stream_audio_sent", n=i, bytes=len(block), rate=config.out_rate)
+    if config.hangup == "after_playback":
+        await wait_playbacks(uuid, len(blocks), timeout=config.tone_seconds + 10)
+    if config.hangup in ("immediate", "after_playback"):
+        log_event(uuid, "uuid_kill_request", reason=config.hangup)
+        log_event(uuid, "uuid_kill", result=await fs_api(f"uuid_kill {uuid}"))
+
+
+def apply_ramp(block: bytes) -> bytes:
+    """Scale an L16 block by a linear 10%->100% ramp."""
+    samples = array.array("h", block)
+    n = len(samples)
+    for i in range(n):
+        samples[i] = int(samples[i] * (0.1 + 0.9 * i / max(1, n - 1)))
+    return samples.tobytes()
+
+
+async def wait_playbacks(uuid: str, count: int, timeout: float) -> None:
+    """Wait until ``count`` playback apps have finished on the channel (or the timeout expires)."""
+    async with playback_changed:
+        try:
+            await asyncio.wait_for(
+                playback_changed.wait_for(lambda: playbacks_done.get(uuid, 0) >= count), timeout
+            )
+        except TimeoutError:
+            log_event(uuid, "wait_playbacks_timeout", done=playbacks_done.get(uuid, 0), expected=count)
 
 
 async def run_esl_player() -> None:
@@ -159,11 +218,17 @@ async def run_esl_player() -> None:
     while True:
         try:
             conn = esl_conn = await EslConnection.connect(ESL_HOST, ESL_PORT, ESL_PASSWORD)
-            await conn.subscribe("CUSTOM mod_audio_stream::play")
+            await conn.subscribe("CHANNEL_EXECUTE_COMPLETE CUSTOM mod_audio_stream::play")
             print("[esl] subscribed to mod_audio_stream::play", flush=True)
             while True:
-                event = await conn.events.get()
+                event = await conn.next_event()
                 uuid = event.get("Unique-ID", "")
+                if event.get("Event-Name") == "CHANNEL_EXECUTE_COMPLETE":
+                    if event.get("Application") == "playback":
+                        async with playback_changed:
+                            playbacks_done[uuid] = playbacks_done.get(uuid, 0) + 1
+                            playback_changed.notify_all()
+                    continue
                 try:
                     path = json.loads(event.get("_body", ""))["file"]
                 except (json.JSONDecodeError, KeyError):

@@ -15,10 +15,18 @@ automated experiments (no softphone needed, standard library only):
 ```bash
 python3 bench/run_experiments.py                       # input, latency, break, kill
 python3 bench/run_experiments.py -e latency --chunks 100,500
+python3 bench/run_experiments.py -e pacing,hangup       # real-time pacing and hang-up after speech
+python3 bench/run_experiments.py --endpoint loopback    # mod_loopback instead of SIP/RTP
 ```
 
-The runner originates `loopback/9999` calls. The caller leg plays a 1 kHz tone and records what it hears;
-the dialplan leg streams to the echo server. Results go to `captures/results-<timestamp>.json`.
+By default the runner places real SIP/RTP (PCMU) calls from FreeSWITCH to itself through the bench-only `bench`
+profile (127.0.0.1:5090, no auth, not reachable from the network). The caller leg plays a 1 kHz tone and records
+what it hears; the dialplan leg streams to the echo server. Results go to `captures/results-<timestamp>.json`.
+
+Prefer `--endpoint sip`: `mod_loopback` clears its outbound frame queue on every audio sync, and every `playback`
+sends one when it starts (`switch_ivr_play_say.c:1497` → `mod_loopback.c:1064-1069`), so back-to-back files lose
+their last 20 ms frame on loopback calls only. Over SIP the same message only flushes the RTP *read* buffer
+(`switch_core_media.c:13045`).
 
 ## What the bench answers
 
@@ -42,7 +50,10 @@ same, so ESL is required. Barge-in and hang-up go over the same ESL connection (
 
 Also: the `uuid_audio_stream` call in the spec's dialplan sketch was missing the `<uuid>` first argument.
 
-## Results (2026-10-27, FreeSWITCH 1.11.3, mod_audio_stream `da8b068`, loopback calls, 16 kHz)
+## Results (2026-10-27, FreeSWITCH 1.11.3, mod_audio_stream `da8b068`, 16 kHz)
+
+Input, latency, barge-in and hang-up below were measured on loopback calls; pacing and hang-up after speech on
+SIP/RTP calls.
 
 The same experiments were first run on 1.10.12; the numbers below are from 1.11.3 and match within a few ms.
 Raw results: `captures/results-*.json` (not committed).
@@ -71,7 +82,9 @@ Raw results: `captures/results-*.json` (not committed).
 
 \* the call was hung up before the queue drained.
 
-With `sendmsg` the caller's recording shows one unbroken tone for every block size.
+Correction: an earlier version of this page said the caller hears one unbroken tone with `sendmsg`. The hole
+detector then merged holes of up to 20 ms, which hid the loopback artifact described above. Over SIP,
+back-to-back files are gapless (checked with a ramp envelope per block).
 
 ### Where the 100 ms gap comes from
 
@@ -98,3 +111,39 @@ The serializer must use `all`.
 
 **Hang-up.** `uuid_kill` over ESL: channel hung up in 21 ms (`NORMAL_CLEARING`), WebSocket closed in 15 ms. The module does not raise `mod_audio_stream::disconnect` on hang-up, only when the server
 drops the connection.
+
+**Real-time pacing** (SIP, `sendmsg`, 3 s tone; block *i* sent at `t0 + (i+1)·block` plus a random delay in
+`[0, jitter]`, optionally holding the start until one extra block is ready):
+
+| Block (ms) | Jitter (ms) | Prebuffer | Underruns (events) | First audio (ms) |
+|---:|---:|---:|---:|---:|
+| 40  | 0 / 20 / 50 | 0 | 1 / 1 / 0 | 65 / 78 / 130 |
+| 40  | 0 / 20 / 50 | 1 | 0 / 0 / 1 | 120 / 119 / 151 |
+| 100 | 0 / 20 / 50 | 0 | 0 / 1 / 0 | 146 / 145 / 190 |
+| 100 | 0 / 20 / 50 | 1 | 0 / 0 / 0 | 249 / 232 / 281 |
+| 200 | 0 / 20 / 50 | 0 | 1 / 0 / 0 | 231 / 252 / 289 |
+| 200 | 0 / 20 / 50 | 1 | 0 / 0 / 1 | 451 / 449 / 472 |
+
+- Underruns are rare and short (0-1 per call, about 20 ms each) even with 50 ms of jitter. The queue self-heals:
+  after one late block, playback runs that much later and the next blocks have margin. Total underrun silence is
+  bounded by the largest delay seen in the call, rounded up to a 20 ms frame.
+- A one-block prebuffer removes them unless the jitter exceeds the block (40 ms blocks, 50 ms jitter), at the cost
+  of one block of latency. First audio is about `block + 25-90 ms`, plus one block with the prebuffer.
+- Each underrun is heard as a ~60 ms hole: the ~20 ms gap plus the start-of-talkspurt loss below.
+
+**Hang-up after speech** (SIP, paced 3 s tone in 200 ms blocks):
+
+| Hang-up | Files played / sent | Speech cut off | Last block → hang-up |
+|---|---:|---:|---:|
+| `uuid_kill` right after the last block | 14 / 15 | 240 ms (the whole last block + ~40 ms) | 26 ms |
+| `uuid_kill` after the last `CHANNEL_EXECUTE_COMPLETE` | 15 / 15 | 0 ms | 270 ms |
+
+An immediate kill on `EndFrame` cuts the end of the bot's speech; waiting for the last file to finish does not.
+
+### Open: ~40 ms lost at the start of a talkspurt (SIP)
+
+Over SIP, when playback starts after silence the caller loses ~40 ms right after the first 20 ms (once per call
+with `sendmsg` and burst sending; at every file with `uuid_broadcast`, since each file follows 100 ms of silence).
+Paced runs show one more ~40 ms hole that is not located yet. In this bench the receiver is FreeSWITCH itself, so it
+is not yet known whether the loss happens when FreeSWITCH sends or when it receives; the write-only recording of the
+sending leg was not usable. Needs an external RTP receiver (pjsua or a packet capture).
