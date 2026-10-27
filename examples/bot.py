@@ -14,12 +14,22 @@ FreeSWITCH dialplan (the last argument is the channel UUID, sent as the first me
     <action application="park"/>
 
 The bot also needs the FreeSWITCH event socket (mod_event_socket) to play audio, barge in and
-hang up. Environment: DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY, and optionally
-FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD.
+hang up. Environment: DEEPGRAM_API_KEY, OPENAI_API_KEY, and optionally FREESWITCH_ESL_HOST,
+FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD.
 
-Run with::
+The text-to-speech service is chosen with TTS_PROVIDER:
+
+- ``cartesia`` (default): CARTESIA_API_KEY, optionally CARTESIA_VOICE_ID.
+- ``elevenlabs``: ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID (required: the service has no default voice).
+
+Run with the extra of the provider you use::
 
     uv run --with "pipecat-ai[websocket,deepgram,openai,cartesia,silero]" examples/bot.py
+    TTS_PROVIDER=elevenlabs uv run --with "pipecat-ai[websocket,deepgram,openai,elevenlabs,silero]" \
+        examples/bot.py
+
+Both services synthesize at the pipeline output rate (OUTPUT_RATE below), so audio reaches
+FreeSWITCH without resampling.
 """
 
 import os
@@ -37,7 +47,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
@@ -57,6 +66,34 @@ STREAM_RATE = 8000
 OUTPUT_RATE = 8000
 
 app = FastAPI()
+
+
+def build_tts():
+    """Create the text-to-speech service selected by TTS_PROVIDER.
+
+    The provider modules are imported here so only the extra you use needs to be installed.
+    """
+    provider = os.getenv("TTS_PROVIDER", "cartesia").lower()
+    if provider == "cartesia":
+        from pipecat.services.cartesia.tts import CartesiaTTSService
+
+        return CartesiaTTSService(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            settings=CartesiaTTSService.Settings(
+                voice=os.getenv("CARTESIA_VOICE_ID", "71a7ad14-091c-4e8e-a314-022ece01c121")
+            ),
+        )
+    if provider == "elevenlabs":
+        from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+
+        voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+        if not voice_id:
+            raise RuntimeError("TTS_PROVIDER=elevenlabs requires ELEVENLABS_VOICE_ID")
+        return ElevenLabsTTSService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            settings=ElevenLabsTTSService.Settings(voice=voice_id),
+        )
+    raise RuntimeError(f"Unknown TTS_PROVIDER {provider!r}; use 'cartesia' or 'elevenlabs'")
 
 
 @app.websocket("/ws")
@@ -97,10 +134,7 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
         api_key=os.getenv("OPENAI_API_KEY"),
         settings=OpenAILLMService.Settings(model="gpt-4.1-mini"),
     )
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        settings=CartesiaTTSService.Settings(voice="71a7ad14-091c-4e8e-a314-022ece01c121"),
-    )
+    tts = build_tts()
 
     context = LLMContext(
         [

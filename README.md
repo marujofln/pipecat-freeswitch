@@ -154,14 +154,30 @@ FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks agains
 
 ## Example
 
-[`examples/bot.py`](examples/bot.py) is a complete voice bot (Deepgram STT, OpenAI LLM, Cartesia TTS, Silero VAD):
+[`examples/bot.py`](examples/bot.py) is a complete voice bot: Deepgram STT, OpenAI LLM, Silero VAD, and a TTS service
+of your choice, **Cartesia** (default) or **ElevenLabs** (two different companies), selected with `TTS_PROVIDER`:
+
+| `TTS_PROVIDER` | Variables | Pipecat extra |
+|---|---|---|
+| `cartesia` (default) | `CARTESIA_API_KEY`, optional `CARTESIA_VOICE_ID` | `cartesia` |
+| `elevenlabs` | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (required: no default voice) | `elevenlabs` |
 
 ```bash
 export DEEPGRAM_API_KEY=... OPENAI_API_KEY=... CARTESIA_API_KEY=...
 export FREESWITCH_ESL_HOST=10.0.0.5 FREESWITCH_ESL_PASSWORD=ClueCon
 uv run --with "pipecat-ai[websocket,deepgram,openai,cartesia,silero]" --with python-dotenv --with uvicorn \
   examples/bot.py
+
+# or with ElevenLabs
+export TTS_PROVIDER=elevenlabs ELEVENLABS_API_KEY=... ELEVENLABS_VOICE_ID=...
+uv run --with "pipecat-ai[websocket,deepgram,openai,elevenlabs,silero]" --with python-dotenv --with uvicorn \
+  examples/bot.py
 ```
+
+Install only the extra of the provider you use. Both services synthesize at the pipeline output rate, so with
+`OUTPUT_RATE` equal to the channel rate in `bot.py` audio reaches FreeSWITCH without resampling. The ElevenLabs
+service in Pipecat supports PCM output at 8, 16, 24, 32 and 48 kHz (`pcm_8000` ... `pcm_48000`); this has been
+checked in Pipecat's code, but neither provider has been run against its live API here.
 
 Point the dialplan's `uuid_audio_stream` at `ws://BOT_HOST:8765/ws mono 8k ${uuid}`.
 

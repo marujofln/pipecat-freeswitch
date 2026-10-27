@@ -12,6 +12,8 @@ All notable changes to this project are documented here. The format follows
   caller audio and 48 kHz bot audio on Opus channels.
 - Bot audio at 48 kHz is sent as WAV (FreeSWITCH plays raw audio only at 8, 16, 24 and 32 kHz).
 - `output_resampler_quality` (default "QQ").
+- `examples/bot.py` can use ElevenLabs as well as Cartesia: set `TTS_PROVIDER=elevenlabs`, `ELEVENLABS_API_KEY`
+  and `ELEVENLABS_VOICE_ID`. Cartesia stays the default; its voice can be set with `CARTESIA_VOICE_ID`.
 
 ### Changed
 
