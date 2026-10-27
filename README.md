@@ -4,14 +4,14 @@ Community integration that connects [Pipecat](https://github.com/pipecat-ai/pipe
 [FreeSWITCH](https://signalwire.com/freeswitch) through the open source
 [`mod_audio_stream`](https://github.com/amigniter/mod_audio_stream) WebSocket module.
 
-> **Status: pre-alpha.** Only the phase 0 test bench exists. The serializer, chunker and control client
-> (`FreeSWITCHFrameSerializer`, `FreeSWITCHControl`) are not written yet. Nothing here has been validated against
-> a live call.
+`FreeSWITCHFrameSerializer` plugs into Pipecat's `FastAPIWebsocketTransport`: caller audio flows into the pipeline,
+bot audio is played on the call, and barge-in and hang-up work.
 
-Pipecat's service catalog lists serializers for Twilio, Telnyx, Plivo, Asterisk and others, but none for FreeSWITCH.
-This project aims to fill that gap and to serve as the transport layer of an ASR/codec evaluation harness.
+> **Status: v0.1.0, alpha.** Tested end to end against FreeSWITCH 1.11.3 with a Pipecat pipeline (tone playback,
+> hang-up after speech, interruption) and with unit tests. The full STT → LLM → TTS example has been built but not
+> run against live AI services. Not yet published on PyPI.
 
-## Planned architecture
+## How it works
 
 ```
 Caller ──SIP/RTP──> FreeSWITCH ──(mod_audio_stream, WebSocket)──> FastAPIWebsocketTransport
@@ -23,106 +23,152 @@ Caller ──SIP/RTP──> FreeSWITCH ──(mod_audio_stream, WebSocket)──
                                                                     pipeline: VAD → STT → LLM → TTS
 ```
 
-- **Input** (FreeSWITCH → bot): binary L16 mono, 8 kHz or 16 kHz, packets of `STREAM_BUFFER_SIZE` ms (default 20).
-- **Output** (bot → FreeSWITCH): JSON `streamAudio` messages carrying base64 audio blocks. The module writes each block
-  to a temporary file and raises the `mod_audio_stream::play` event. It does **not** play the file itself:
-  `FreeSWITCHControl` receives the event over ESL and queues `playback <file>` on the channel with `sendmsg`.
-  Output is therefore not a stream: audio is grouped into blocks, which trades latency against overhead.
-- **Control**: a single inbound ESL connection per call (`filter Unique-ID <uuid>`) handles playback, barge-in
-  (`uuid_break <uuid> all`) and hang-up (`uuid_kill`). The ESL client is built on asyncio streams, with no extra
-  dependency. `mod_xml_rpc` is not used: it can neither receive events nor send `sendmsg`.
-- **Channel UUID**: passed as the last `uuid_audio_stream ... start` argument and delivered as the first text message
-  on the WebSocket.
+- **Caller audio**: mod_audio_stream sends binary L16 frames; the serializer turns them into `InputAudioRawFrame`.
+- **Bot audio**: each output frame becomes a `streamAudio` JSON message. The open source mod_audio_stream only writes
+  it to a file and raises `mod_audio_stream::play`; **it does not play it**. The serializer therefore keeps an event
+  socket (ESL) connection per call and queues `playback` of each file with `sendmsg`. (`uuid_broadcast` would add
+  100 ms of silence before every file.)
+- **Barge-in**: on `InterruptionFrame`, `uuid_break <uuid> all` stops playback and clears the queue; audio still in
+  flight from before the interruption is dropped.
+- **Hang-up**: on `EndFrame`, the serializer waits until the queued audio has finished playing, then runs
+  `uuid_kill`; on `CancelFrame` it hangs up at once.
+- **Channel UUID**: the last argument of `uuid_audio_stream ... start`, delivered as the first WebSocket message.
 
-## Repository layout
-
-```
-pipecat-freeswitch/
-├── bench/
-│   ├── echo_server.py      # phase 0 WebSocket echo/tone server + ESL player + control endpoints
-│   ├── esl.py              # minimal asyncio ESL client (standard library only)
-│   ├── run_experiments.py  # automated phase 0 experiments (SIP/RTP calls to itself, or loopback)
-│   ├── rtp_wire.py         # packet capture: RTP on the wire vs what the caller hears
-│   ├── requirements.txt
-│   └── Dockerfile
-├── examples/freeswitch/
-│   ├── Dockerfile          # FreeSWITCH built from source + mod_audio_stream
-│   ├── docker-compose.yml  # FreeSWITCH + echo server
-│   ├── conf/               # minimal FreeSWITCH configuration (dialplan, SIP profile, event socket, ...)
-│   └── README.md           # how to run the bench and read the captures
-└── docs/                   # research notes (research.md) and specification (specification.md)
-```
-
-## Phase 0 test bench
+## Installation
 
 ```bash
-cd examples/freeswitch
-docker compose build   # compiles FreeSWITCH, expect 15-30 minutes
-docker compose up
+pip install "pipecat-freeswitch @ git+https://github.com/marujofln/pipecat-freeswitch"
+# or, with uv
+uv add "pipecat-freeswitch @ git+https://github.com/marujofln/pipecat-freeswitch"
 ```
 
-Run the automated experiments with `python3 bench/run_experiments.py` (loopback calls, no softphone), or
-register a SIP softphone as user `1000`, password `1234`, against the host IP on port 5060, then dial `9999`.
-The dialplan runs `uuid_audio_stream` toward `ws://127.0.0.1:8765/ws` (mono, 16 kHz) and parks the call.
+The ESL client is built on asyncio streams; the only dependency is `pipecat-ai`. Install the Pipecat extras your
+pipeline needs (`websocket` for the transport, plus your STT/LLM/TTS services).
 
-The echo server runs in one of two modes (`MODE` environment variable):
+## FreeSWITCH setup
 
-| Mode   | Behavior |
-|--------|----------|
-| `echo` | Sends the caller's audio back in `CHUNK_MS` blocks as `streamAudio`. |
-| `tone` | On connect, sends 10 s of a 440 Hz tone in one burst, to observe how the module queues files. |
+1. **mod_audio_stream** (community edition), loaded in `modules.conf.xml`. The bench builds it from source:
+   see [`examples/freeswitch/Dockerfile`](examples/freeswitch/Dockerfile).
+2. **mod_event_socket**, reachable from the bot. The event socket grants full control of FreeSWITCH: keep it on a
+   private network, restrict it with an ACL (`apply-inbound-acl`) and set a strong password.
+3. **SIP profiles with an RTP timer** (`<param name="rtp-timer-name" value="soft"/>`, as in the vanilla config).
+4. **Dialplan**: answer, start the stream with the channel UUID as metadata, and park:
 
-Per-call events (wall-clock timestamps) are written to `examples/freeswitch/captures/<uuid>.jsonl`.
-Experiment endpoints on the echo server (commands go over ESL):
+```xml
+<extension name="pipecat">
+  <condition field="destination_number" expression="^9999$">
+    <action application="answer"/>
+    <action application="set"
+      data="stream_result=${uuid_audio_stream(${uuid} start ws://BOT_HOST:8765/ws mono 8k ${uuid})}"/>
+    <action application="park"/>
+  </condition>
+</extension>
+```
 
-| Endpoint | Action |
-|----------|--------|
-| `GET /break/<uuid>` | `uuid_break` |
-| `GET /break/<uuid>?all=true` | `uuid_break ... all` (does it clear queued files?) |
-| `GET /kill/<uuid>` | `uuid_kill` |
+## Usage
 
-### Configuration (echo server)
+```python
+from fastapi import WebSocket
+from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `ECHO_PORT` | `8765` | WebSocket listen port |
-| `CHUNK_MS` | `300` | Output block size in milliseconds |
-| `OUT_SAMPLE_RATE` | `16000` | Sample rate of generated audio (`tone` mode) |
-| `MODE` | `echo` | `echo` or `tone` |
-| `PLAY_METHOD` | `sendmsg` | `sendmsg` (ESL execute, gapless) or `broadcast` (`uuid_broadcast`, +100 ms per file) |
-| `TONE_SECONDS` | `10` | Tone length |
-| `CAPTURE_DIR` | `./captures` | Where logs and raw input audio are written |
-| `FS_ESL_HOST`, `FS_ESL_PORT`, `FS_ESL_PASSWORD` | `127.0.0.1`, `8021`, `ClueCon` | FreeSWITCH event socket |
+from pipecat_freeswitch import FreeSWITCHFrameSerializer
 
-## Findings so far
 
-- The open source `mod_audio_stream` only writes the received audio to `$temp/<uuid>_<n>.tmp.<ext>` and fires the custom
-  event `mod_audio_stream::play` (JSON with a `file` field). The bench plays it with an ESL listener that queues
-  `playback <file>` on the channel via `sendmsg`. ESL is therefore required for playback, not only for control.
-- Supported `streamAudio` types: `raw` (8, 16, 24, 32, 48, 64 kHz), `wav`, `mp3`, `ogg`, `pcmu`, `pcma`.
-- Measured on the bench (details in [`examples/freeswitch/README.md`](examples/freeswitch/README.md)):
-  - `uuid_broadcast` adds 100 ms of silence before every file (hardcoded `lead-frames: 5` in
-    FreeSWITCH), so 100 ms blocks play at half speed. Queuing `playback` through ESL `sendmsg` instead gives
-    gapless playback and first audio 24-41 ms after `streamAudio` is sent, for blocks from 100 to 1000 ms.
-  - `uuid_break` alone stops only the current file; `uuid_break <uuid> all` clears the queue (22 ms).
-  - `uuid_kill` hangs up in about 20 ms, but killing right after the last block cuts it off (240 ms with 200 ms
-    blocks); waiting for the last file's `CHANNEL_EXECUTE_COMPLETE` keeps the whole speech.
-  - With blocks sent in real time and up to 50 ms of jitter, playback underruns are rare (0-1 per call, ~20 ms);
-    a one-block prebuffer removes them.
-  - The bench's receiving leg loses ~40 ms at the start of each talkspurt over SIP; a packet capture shows the RTP
-    sent toward the caller is complete, so this is receiver behavior, not the package's.
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    call_uuid = (await websocket.receive_text()).strip()  # first message: the channel UUID
 
-## Roadmap
+    serializer = FreeSWITCHFrameSerializer(
+        call_uuid=call_uuid,
+        esl_host="10.0.0.5",
+        esl_port=8021,
+        esl_password="ClueCon",
+        params=FreeSWITCHFrameSerializer.InputParams(freeswitch_sample_rate=8000),
+    )
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_out_10ms_chunks=4,       # 40 ms per streamAudio block
+            audio_out_end_silence_secs=0,  # the serializer waits for playback before hanging up
+            serializer=serializer,
+        ),
+    )
+    # Build the pipeline with transport.input() ... transport.output() and run it, with
+    # PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000).
+```
 
-- **Phase 0**: bench and measurements (done).
-- **v0.1**: `FreeSWITCHFrameSerializer`, chunker, `FreeSWITCHControl`, single-file example, tests, PyPI release.
-- **v0.2**: DTMF support, adapters for `mod_audio_fork` and `mod_earshot`.
-- **v0.3**: latency metrics (time to first audio by block size).
+`call_uuid` is optional: without it the serializer takes the UUID from the first message and holds bot audio until
+the event socket is ready. Reading it yourself, as above, lets the serializer connect during pipeline setup.
+
+### Parameters
+
+| `InputParams` field | Default | Meaning |
+|---|---|---|
+| `freeswitch_sample_rate` | `8000` | Rate given to `uuid_audio_stream` (`8k` or `16k`), used in both directions |
+| `sample_rate` | `None` | Override for the pipeline input rate |
+| `auto_hang_up` | `True` | Hang up on `EndFrame` (after playback) and `CancelFrame` (at once) |
+| `hang_up_timeout_secs` | `30.0` | Maximum wait for queued audio on `EndFrame` |
+
+Constructor: `call_uuid`, `esl_host` (`127.0.0.1`), `esl_port` (`8021`), `esl_password` (`ClueCon`), `params`, and
+optionally `control` (a `FreeSWITCHControl` to use instead of one built from the `esl_*` arguments).
+
+### Choosing the block size
+
+Each output chunk of the transport (`audio_out_10ms_chunks` × 10 ms) becomes one `streamAudio` message, one temporary
+file and one `playback` in FreeSWITCH. Smaller blocks cut latency; larger blocks cut per-file overhead. On the bench,
+40 ms and 200 ms blocks both played gaplessly with first audio about 25–40 ms after the message was sent. Running the
+pipeline at the stream rate (`8000` for `8k`) avoids resampling.
+
+### Known limitations
+
+- No DTMF yet (planned for v0.2).
+- Pipecat's WebSocket transport sends audio about twice as fast as real time, so FreeSWITCH queues ahead of playback
+  and `BotStoppedSpeakingFrame` can arrive before the caller has heard the end of the speech.
+- The serializer relies on mod_audio_stream naming files `<uuid>_<n>.tmp.<ext>` in send order to drop stale audio
+  after an interruption; this was verified on commit `da8b068`.
+
+## Example
+
+[`examples/bot.py`](examples/bot.py) is a complete voice bot (Deepgram STT, OpenAI LLM, Cartesia TTS, Silero VAD):
+
+```bash
+export DEEPGRAM_API_KEY=... OPENAI_API_KEY=... CARTESIA_API_KEY=...
+export FREESWITCH_ESL_HOST=10.0.0.5 FREESWITCH_ESL_PASSWORD=ClueCon
+uv run --with "pipecat-ai[websocket,deepgram,openai,cartesia,silero]" --with python-dotenv --with uvicorn \
+  examples/bot.py
+```
+
+Point the dialplan's `uuid_audio_stream` at `ws://BOT_HOST:8765/ws mono 8k ${uuid}`.
+
+## Development
+
+```bash
+uv venv && uv pip install -e . pytest pytest-asyncio ruff
+.venv/bin/python -m pytest          # unit tests (fake event socket, no FreeSWITCH needed)
+.venv/bin/ruff check src tests && .venv/bin/ruff format --check src tests
+```
+
+[`examples/freeswitch/`](examples/freeswitch/) is a test bench: FreeSWITCH 1.11.3 built from source with
+mod_audio_stream, a bench-only SIP profile so FreeSWITCH can call itself, and experiment scripts. End-to-end test of
+the serializer with a real Pipecat pipeline:
+
+```bash
+cd examples/freeswitch && docker compose up -d && cd ../..
+uv pip install "pipecat-ai[websocket]" fastapi "uvicorn[standard]"
+.venv/bin/python bench/tone_bot.py &   # Pipecat bot on extension 9998
+python3 bench/run_e2e.py               # tone + hang-up after speech, and interruption
+```
+
+The bench README documents the phase 0 measurements that shaped the design: why playback uses `sendmsg`, why
+`uuid_break` needs `all`, and why hang-up waits for playback.
 
 ## Tested versions
 
-Pipecat: not yet tested (target ≥ 1.10.0). FreeSWITCH: v1.11.3 (bench image; phase 0 results also
-reproduced on v1.10.12). mod_audio_stream: `da8b068` (community edition). Python: 3.12+.
+Pipecat 1.14.0, FreeSWITCH 1.11.3 (phase 0 results also reproduced on 1.10.12), mod_audio_stream `da8b068`
+(community edition), Python 3.12.
 
 ## License
 

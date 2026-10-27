@@ -1,7 +1,7 @@
-# Specification — pipecat-freeswitch (draft v2)
+# Specification — pipecat-freeswitch (v0.1)
 
-Technical design defined in the 2026-10-27 session and revised the same day with the Phase 0 results
-(bench in `examples/freeswitch/`, numbers in `examples/freeswitch/README.md`).
+Technical design defined in the 2026-10-27 session, revised the same day with the Phase 0 results
+(bench in `examples/freeswitch/`, numbers in `examples/freeswitch/README.md`) and implemented in v0.1.0.
 
 ## Goal
 
@@ -62,8 +62,9 @@ pipecat-freeswitch/
 │   ├── __init__.py
 │   ├── serializer.py       # FreeSWITCHFrameSerializer
 │   ├── control.py          # FreeSWITCHControl: ESL (play via sendmsg, uuid_break all, uuid_kill)
-│   └── chunker.py          # groups output audio into streamAudio blocks
-├── bench/                  # Phase 0 bench: echo_server.py, esl.py, run_experiments.py, rtp_wire.py
+│   └── esl.py              # ESLConnection: minimal asyncio event socket client
+├── bench/                  # bench: echo_server.py, esl.py, run_experiments.py, rtp_wire.py,
+│                           #        tone_bot.py + run_e2e.py (end-to-end test of the serializer)
 ├── examples/
 │   ├── bot.py              # foundational single-file example
 │   └── freeswitch/
@@ -72,7 +73,7 @@ pipecat-freeswitch/
 │       └── conf/               # dialplan, SIP profiles, modules.conf.xml, event_socket.conf.xml
 ├── tests/
 │   ├── test_serializer.py
-│   └── fixtures/           # L16 8k/16k samples
+│   └── fake_esl.py         # fake event socket used by the unit tests
 ├── .github/workflows/      # lint, tests, PyPI release
 ├── CHANGELOG.md
 ├── LICENSE                 # BSD-2
@@ -80,45 +81,64 @@ pipecat-freeswitch/
 └── pyproject.toml          # uv
 ```
 
-## FreeSWITCHFrameSerializer (sketch)
+## No chunker: the transport already chunks
+
+The original design had a `chunker.py` grouping output audio into blocks. It was dropped while implementing v0.1:
+
+- The serializer cannot flush a partial block on its own: it only sends when the transport calls `serialize()`, and
+  after the TTS stops no further frame reaches it (`FastAPIWebsocketTransport` inserts no silence between
+  utterances, and `TTSStoppedFrame` is not passed to the serializer).
+- The output transport already delivers audio in chunks of `audio_out_10ms_chunks` × 10 ms and, on
+  `TTSStoppedFrame`, flushes the remainder padded with silence (`base_output.py`, `handle_tts_stopped`).
+
+So each `OutputAudioRawFrame` becomes one `streamAudio` message and the block size is the transport's
+`audio_out_10ms_chunks`. This also makes the pacing issue of PR pipecat-ai/pipecat#5593 moot: the serializer returns
+a payload for every audio frame.
+
+`FastAPIWebsocketTransport` paces output at **twice real time** (`_send_interval = chunk / rate / 2`). FreeSWITCH
+therefore queues ahead of playback during speech, which removes the underrun risk measured with real-time pacing
+(no prebuffer needed) but makes waiting for playback before hang-up essential.
+
+## FreeSWITCHFrameSerializer (as implemented)
 
 ```python
 class FreeSWITCHFrameSerializer(FrameSerializer):
     """Serializer for FreeSWITCH mod_audio_stream (open source edition)."""
 
-    # params: sample_rate (8000|16000), chunk_ms, auto_hang_up=True,
-    #         control: FreeSWITCHControl, optional call_uuid (otherwise taken from the first text message)
+    # args: call_uuid (optional), esl_host, esl_port, esl_password, params, control (optional)
+    # params: freeswitch_sample_rate (8000), sample_rate, auto_hang_up (True), hang_up_timeout_secs (30)
 
+    # setup(): connect the control if call_uuid is known (setup runs twice: input and output transport)
     # deserialize: FreeSWITCH -> Pipecat
-    #   first text message -> metadata (channel UUID) -> control.attach(uuid) starts playing files
-    #   binary L16         -> InputAudioRawFrame (resample if rate != pipeline)
-    #   JSON event         -> log; DTMF -> InputDTMFFrame (v0.2)
+    #   first text message -> channel UUID (plain or {"uuid": ...}) -> control.start(uuid)
+    #   binary L16         -> InputAudioRawFrame (resampled to the pipeline rate)
     #
     # serialize: Pipecat -> FreeSWITCH
-    #   OutputAudioRawFrame  -> chunker -> {"type":"streamAudio","data":{"audioDataType":"raw","sampleRate":N,"audioData":b64}}
-    #   InterruptionFrame    -> drop the chunker buffer + control.uuid_break(uuid, all=True)
-    #   EndFrame/CancelFrame -> flush/drop + control.uuid_kill(uuid) if auto_hang_up
+    #   OutputAudioRawFrame  -> {"type":"streamAudio","data":{"audioDataType":"raw","sampleRate":N,"audioData":b64}}
+    #                           (held and merged into the next block until the control is ready)
+    #   InterruptionFrame    -> control.interrupt(sent_messages): uuid_break all, drop stale files
+    #   EndFrame             -> control.wait_for_playback() then uuid_kill (if auto_hang_up)
+    #   CancelFrame          -> uuid_kill at once (if auto_hang_up)
 ```
 
 ```python
 class FreeSWITCHControl:
     """ESL client: plays files announced by mod_audio_stream and sends break/kill."""
 
-    # connect(host, port, password); filter Unique-ID <uuid>;
-    # subscribe CUSTOM mod_audio_stream::play CHANNEL_EXECUTE_COMPLETE
-    # on play event for an attached uuid -> sendmsg <uuid> execute playback <file> (no lead-frames)
-    # interrupt(uuid) -> api uuid_break <uuid> all
-    # hang_up(uuid)   -> wait for the last file's CHANNEL_EXECUTE_COMPLETE, then api uuid_kill <uuid>
+    # start(uuid): connect, filter Unique-ID <uuid>, subscribe
+    #   CHANNEL_EXECUTE_COMPLETE CHANNEL_HANGUP_COMPLETE CUSTOM mod_audio_stream::play (guarded by a lock)
+    # on play event -> sendmsg <uuid> execute playback <file> (no lead-frames), unless the file index is
+    #   below the message count at the last interruption
+    # interrupt(sent)            -> api uuid_break <uuid> all; drop files with index < sent
+    # wait_for_playback(sent, t) -> until every file up to index sent-1 was announced and finished,
+    #                               the channel hung up, or the timeout
+    # hang_up()                  -> api uuid_kill <uuid>
 ```
 
 Points of attention:
-- **Block size:** with `sendmsg` there is no fixed cost per file, so blocks can be small (100 ms measured with no
-  gap). What remains is the latency × overhead trade-off (base64, one file and one event per block), which is the
-  open experimental question. Re-check with 20–60 ms blocks.
-- **Pacing (PR pipecat-ai/pipecat#5593, fixed in Pipecat 1.10.0):** if the serializer emits no payload for an audio
-  frame, the transport skips pacing and `BotStoppedSpeakingFrame`/`EndFrame` arrive early. Since the chunker
-  accumulates frames (returning `None` for many of them), verify this behavior and require Pipecat ≥ 1.10.0.
-- **Flush** the last partial block when the bot stops speaking (e.g. on `TTSStoppedFrame`).
+- **Block size:** with `sendmsg` there is no fixed cost per file, so blocks can be small (40 ms tested end to end
+  with no gap). What remains is the latency × overhead trade-off (base64, one file and one event per block), which
+  is an open experimental question. The block size is the transport's `audio_out_10ms_chunks`.
 - **File order:** `play` events arrive in `streamAudio` order, and `sendmsg` keeps the channel queue in order.
   `uuid_break all` clears the queue, but `play` events in flight can arrive after the break. Fix: the module names
   files `<uuid>_<n>` with `n` increasing per `streamAudio` (`audio_streamer_glue.cpp:430`); the serializer counts
@@ -128,11 +148,12 @@ Points of attention:
   to 50 ms of random delay: 0–1 underrun per call, ~20 ms each. The queue self-heals (after one late block,
   playback runs that much later and gains margin), so total silence is bounded by the largest delay in the call.
   A one-block prebuffer removes almost all of them (it only fails when the delay exceeds the block size), at the
-  cost of one block of latency. Decision for the chunker: configurable one-block prebuffer, on by default.
+  cost of one block of latency. Not needed in v0.1: `FastAPIWebsocketTransport` sends at twice real time, so the
+  queue builds up ahead of playback.
 - **`uuid_kill` on `EndFrame` cuts off the end of the speech (confirmed).** Kill right after the last block: the last
   file never started and 240 ms of speech were lost (200 ms blocks). Waiting for the last file's
-  `CHANNEL_EXECUTE_COMPLETE`: nothing lost, hang-up 270 ms after the last block. The control must wait (with a
-  timeout).
+  `CHANNEL_EXECUTE_COMPLETE`: nothing lost, hang-up 270 ms after the last block. Implemented in v0.1 (with a
+  timeout); end to end, the hang-up comes 25–60 ms after the last audio the caller hears.
 - **~40 ms lost at the start of each talkspurt (SIP): on the receiving side, not the sending side.** The bench's
   caller leg (a FreeSWITCH receiving) loses ~40 ms whenever audio resumes after silence. The packet capture
   (`bench/rtp_wire.py`) shows the RTP sent by the bot leg is complete, with no sequence or timestamp gaps; the only
@@ -141,8 +162,8 @@ Points of attention:
 - **Bench with `mod_loopback`:** loses the last 20 ms frame of each back-to-back file (`playback` sends an audio sync
   when it starts and the loopback clears its outbound queue). It is a loopback artifact; audio measurements must use
   SIP (`--endpoint sip`, the default).
-- **Early `BotStoppedSpeakingFrame`:** it arrives up to one block before the audio really ends. Small effect on turn
-  detection; document it.
+- **Early `BotStoppedSpeakingFrame`:** with the transport sending at twice real time, it can arrive well before the
+  caller has heard the end of the speech (up to half the utterance for long ones). Documented as a known limitation.
 - **Hang-up:** `uuid_kill` tears the channel down in ~20 ms and the WebSocket closes in ~15 ms. The module does not
   raise `mod_audio_stream::disconnect` on hang-up, only when the server closes the connection.
 - **Deployment:** the bench's ESL listens on `127.0.0.1` only. In production the bot needs access to the event socket
@@ -173,19 +194,22 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
   `bench/run_experiments.py` with SIP/RTP calls to itself (or loopback); `bench/rtp_wire.py` packet capture.
   Answered: L16 arrival, latency per block size, source of the 100 ms gap (`uuid_broadcast`'s `lead-frames`),
   `uuid_break` with and without `all`, `uuid_kill`, real-time pacing, hang-up after speech.
-- **v0.1:** serializer + chunker + control (ESL), `bot.py` example, docker-compose, README, CHANGELOG, serializer
-  tests, 30–60 s video with an interruption, PR to the Pipecat docs. Enough for listing.
+- **v0.1 (implemented on 2026-10-27):** serializer + control (ESL), `bot.py` example, README, CHANGELOG, unit tests,
+  end-to-end test on the bench. Still to do for listing: PyPI release, 30–60 s video with an interruption, PR to the
+  Pipecat docs.
 - **v0.2:** DTMF (ESL or a dialplan bind), adapters for `mod_audio_fork` and `mod_earshot`'s native protocol.
 - **v0.3:** latency metrics (time to first audio per block size).
 
 ## Listing checklist (community integrations guide)
 
-- [ ] Code with Pipecat-style docstrings
-- [ ] Foundational single-file example
-- [ ] README: intro, installation, usage, how to run the example, tested Pipecat version
+- [x] Code with Pipecat-style docstrings
+- [x] Foundational single-file example (`examples/bot.py`; built, not yet run against live AI services)
+- [x] README: intro, installation, usage, how to run the example, tested Pipecat version
 - [x] BSD-2 LICENSE
-- [ ] CHANGELOG, PyPI release
-- [ ] Hang-up through the native API (ESL); DTMF → `InputDTMFFrame` (if supported)
+- [x] CHANGELOG
+- [ ] PyPI release
+- [x] Hang-up through the native API (ESL)
+- [ ] DTMF → `InputDTMFFrame` (v0.2)
 - [ ] Fork of pipecat-ai/docs: row in `supported-services.mdx`, page `serializers/freeswitch.mdx`, `docs.json`
 - [ ] 30–60 s video showing it working + an interruption
 - [ ] Post in the Discord `#community-integrations` channel

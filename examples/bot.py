@@ -1,0 +1,151 @@
+#
+# Copyright (c) 2026, Marcelo Araujo
+#
+# SPDX-License-Identifier: BSD 2-Clause License
+#
+
+"""Voice bot answering FreeSWITCH calls through mod_audio_stream.
+
+FreeSWITCH dialplan (the last argument is the channel UUID, sent as the first message)::
+
+    <action application="answer"/>
+    <action application="set"
+      data="r=${uuid_audio_stream(${uuid} start ws://BOT_HOST:8765/ws mono 8k ${uuid})}"/>
+    <action application="park"/>
+
+The bot also needs the FreeSWITCH event socket (mod_event_socket) to play audio, barge in and
+hang up. Environment: DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY, and optionally
+FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD.
+
+Run with::
+
+    uv run --with "pipecat-ai[websocket,deepgram,openai,cartesia,silero]" examples/bot.py
+"""
+
+import os
+
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket
+from loguru import logger
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.frames.frames import LLMRunFrame
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transports.websocket.fastapi import (
+    FastAPIWebsocketParams,
+    FastAPIWebsocketTransport,
+)
+from pipecat.workers.runner import WorkerRunner
+
+from pipecat_freeswitch import FreeSWITCHFrameSerializer
+
+load_dotenv(override=True)
+
+# Must match the rate given to uuid_audio_stream ("8k"). Running the pipeline at the same rate
+# avoids resampling in both directions.
+SAMPLE_RATE = 8000
+
+app = FastAPI()
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Handle one call."""
+    await websocket.accept()
+    # mod_audio_stream sends the metadata (here, the channel UUID) before any audio.
+    call_uuid = (await websocket.receive_text()).strip()
+    logger.info(f"Call {call_uuid} connected")
+    await run_bot(websocket, call_uuid)
+
+
+async def run_bot(websocket: WebSocket, call_uuid: str):
+    """Run the voice pipeline for one call."""
+    serializer = FreeSWITCHFrameSerializer(
+        call_uuid=call_uuid,
+        esl_host=os.getenv("FREESWITCH_ESL_HOST", "127.0.0.1"),
+        esl_port=int(os.getenv("FREESWITCH_ESL_PORT", "8021")),
+        esl_password=os.getenv("FREESWITCH_ESL_PASSWORD", "ClueCon"),
+        params=FreeSWITCHFrameSerializer.InputParams(freeswitch_sample_rate=SAMPLE_RATE),
+    )
+
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            # Each output chunk becomes one file played by FreeSWITCH: 4 x 10 ms = 40 ms blocks.
+            audio_out_10ms_chunks=4,
+            # No trailing silence: the serializer already waits for playback before hanging up.
+            audio_out_end_silence_secs=0,
+            serializer=serializer,
+        ),
+    )
+
+    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    llm = OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        settings=OpenAILLMService.Settings(model="gpt-4.1-mini"),
+    )
+    tts = CartesiaTTSService(
+        api_key=os.getenv("CARTESIA_API_KEY"),
+        settings=CartesiaTTSService.Settings(voice="71a7ad14-091c-4e8e-a314-022ece01c121"),
+    )
+
+    context = LLMContext(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful assistant on a phone call. Keep answers short and "
+                    "conversational; your output is spoken, so avoid lists and formatting."
+                ),
+            }
+        ]
+    )
+    aggregators = LLMContextAggregatorPair(
+        context, user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer())
+    )
+
+    pipeline = Pipeline(
+        [
+            transport.input(),
+            stt,
+            aggregators.user(),
+            llm,
+            tts,
+            transport.output(),
+            aggregators.assistant(),
+        ]
+    )
+
+    worker = PipelineWorker(
+        pipeline,
+        params=PipelineParams(audio_in_sample_rate=SAMPLE_RATE, audio_out_sample_rate=SAMPLE_RATE),
+    )
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        context.add_message({"role": "user", "content": "Greet the caller briefly."})
+        await worker.queue_frames([LLMRunFrame()])
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info(f"Call {call_uuid} disconnected")
+        await worker.cancel()
+
+    runner = WorkerRunner(handle_sigint=False)
+    await runner.add_workers(worker)
+    await runner.run()
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8765")))

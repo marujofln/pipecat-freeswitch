@@ -11,5 +11,13 @@
         <action application="park"/>
       </condition>
     </extension>
+    <!-- 9998: stream to a Pipecat bot using FreeSWITCHFrameSerializer (bench/tone_bot.py), 8 kHz. -->
+    <extension name="pipecat_bot">
+      <condition field="destination_number" expression="^9998$">
+        <action application="answer"/>
+        <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8766/ws mono 8k ${uuid})}"/>
+        <action application="park"/>
+      </condition>
+    </extension>
   </context>
 </include>

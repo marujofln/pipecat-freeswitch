@@ -229,6 +229,8 @@ async def run_esl_player() -> None:
                             playbacks_done[uuid] = playbacks_done.get(uuid, 0) + 1
                             playback_changed.notify_all()
                     continue
+                if uuid not in leg_configs:
+                    continue  # another app's channel (e.g. the Pipecat bot on 9998)
                 try:
                     path = json.loads(event.get("_body", ""))["file"]
                 except (json.JSONDecodeError, KeyError):

@@ -22,6 +22,24 @@ python3 bench/rtp_wire.py [--paced]                     # RTP on the wire vs wha
 
 `rtp_wire.py` needs the capture image: `docker compose --profile tools build tcpdump`.
 
+End-to-end test of `FreeSWITCHFrameSerializer` (extension `9998`, served by a Pipecat pipeline):
+
+```bash
+.venv/bin/python bench/tone_bot.py &   # from the repository root, with pipecat-ai[websocket], fastapi, uvicorn
+python3 bench/run_e2e.py               # speak_end and interrupt scenarios, 40 and 200 ms blocks
+```
+
+Results on 2026-10-27 (SIP, 8 kHz):
+
+| Block | Scenario | Result |
+|---:|---|---|
+| 40 ms | tone, then `EndFrame` | 2.92 of 3.0 s heard, hang-up 25 ms after the last audio |
+| 40 ms | interruption 1.5 s in | 21 ms of audio after the interruption, no resume |
+| 200 ms | tone, then `EndFrame` | 2.92 of 3.0 s heard, hang-up 60 ms after the last audio |
+| 200 ms | interruption 1.5 s in | 17 ms of audio after the interruption, no resume |
+
+The 80 ms missing are the bench's receiving FreeSWITCH (see the talkspurt section below), not the serializer.
+
 By default the runner places real SIP/RTP (PCMU) calls from FreeSWITCH to itself through the bench-only `bench`
 profile (127.0.0.1:5090, no auth, not reachable from the network). The caller leg plays a 1 kHz tone and records
 what it hears; the dialplan leg streams to the echo server. Results go to `captures/results-<timestamp>.json`.

@@ -49,8 +49,8 @@ WINDOW_S = 0.010
 # loopback: no RTP, but mod_loopback drops queued frames on every playback start (audio sync).
 # sip: real SIP/RTP (PCMU) through the bench-only profile on 127.0.0.1:5090.
 DIAL_STRINGS = {
-    "loopback": "loopback/9999/default",
-    "sip": "sofia/bench/9999@127.0.0.1:5090",
+    "loopback": "loopback/{extension}/default",
+    "sip": "sofia/bench/{extension}@127.0.0.1:5090",
 }
 
 
@@ -79,6 +79,7 @@ class Bench:
     play_method: str = "sendmsg"
     out_rate: int = 16000
     endpoint: str = "loopback"
+    extension: str = "9999"
     events: list[dict] = field(default_factory=list)
 
     async def collect_events(self) -> None:
@@ -152,7 +153,8 @@ class Bench:
         since = time.time()
         await self.conn.api(
             f"originate {{origination_uuid={call.caller_uuid},RECORD_READ_ONLY=true}}"
-            f"{DIAL_STRINGS[self.endpoint]} &endless_playback(tone_stream://%(500,500,1000))"
+            f"{DIAL_STRINGS[self.endpoint].format(extension=self.extension)} "
+            "&endless_playback(tone_stream://%(500,500,1000))"
         )
         call.leg_uuid = await self.wait_for_connect(since)
         call.recording = f"/captures/{call.caller_uuid}-caller.wav"
