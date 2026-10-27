@@ -1,0 +1,33 @@
+# Phase-0 test bench: FreeSWITCH + mod_audio_stream + echo WebSocket server.
+# Dial extension 9999 (SIP user 1000, password 1234) to reach the echo server.
+services:
+  freeswitch:
+    build: .
+    network_mode: host   # RTP over NAT-less host networking is the simplest for SIP softphones
+    volumes:
+      - ./conf/vars.xml:/usr/local/freeswitch/etc/freeswitch/vars.xml:ro
+      - ./conf/freeswitch.xml:/usr/local/freeswitch/etc/freeswitch/freeswitch.xml:ro
+      - ./conf/autoload_configs:/usr/local/freeswitch/etc/freeswitch/autoload_configs:ro
+      - ./conf/dialplan:/usr/local/freeswitch/etc/freeswitch/dialplan:ro
+      - ./conf/sip_profiles:/usr/local/freeswitch/etc/freeswitch/sip_profiles:ro
+      - ./conf/directory:/usr/local/freeswitch/etc/freeswitch/directory:ro
+      - ./captures:/captures   # caller-side recordings from bench/run_experiments.py
+    environment:
+      STREAM_BUFFER_SIZE: "20"
+
+  echo:
+    build:
+      context: ../../bench
+    network_mode: host
+    environment:
+      FS_ESL_HOST: 127.0.0.1
+      FS_ESL_PORT: "8021"
+      FS_ESL_PASSWORD: ClueCon
+      ECHO_PORT: "8765"
+      OUT_SAMPLE_RATE: "16000"
+      CHUNK_MS: "300"
+      MODE: echo
+      CAPTURE_DIR: /captures
+    volumes:
+      - ./captures:/captures
+    depends_on: [freeswitch]

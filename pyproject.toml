@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pipecat-freeswitch"
+version = "0.0.1"
+description = "Pipecat integration for FreeSWITCH via the mod_audio_stream WebSocket module."
+readme = "README.md"
+license = "BSD-2-Clause"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Marcelo Araujo", email = "marujofln@gmail.com" }]
+keywords = ["pipecat", "freeswitch", "voice-ai", "telephony", "websocket", "voice-agent"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+# The ESL client is implemented on asyncio streams, so no extra dependency is needed.
+dependencies = [
+    "pipecat-ai>=1.10.0",
+]
+
+[project.urls]
+Repository = "https://github.com/marujofln/pipecat-freeswitch"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+bench = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pipecat_freeswitch"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "D"]
+ignore = ["D105", "D107"]
+pydocstyle = { convention = "google" }

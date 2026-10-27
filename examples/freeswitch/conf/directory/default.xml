@@ -1,0 +1,15 @@
+<include>
+  <domain name="$${domain}">
+    <params><param name="dial-string" value="{^^:sip_invite_domain=${dialed_domain}}${sofia_contact(*/${dialed_user}@${dialed_domain})}"/></params>
+    <groups>
+      <group name="default">
+        <users>
+          <user id="1000">
+            <params><param name="password" value="$${default_password}"/></params>
+            <variables><variable name="user_context" value="default"/></variables>
+          </user>
+        </users>
+      </group>
+    </groups>
+  </domain>
+</include>

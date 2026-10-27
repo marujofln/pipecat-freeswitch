@@ -1,0 +1,15 @@
+<include>
+  <context name="default">
+    <!-- 9999: stream the caller's audio to the bench WebSocket server (mono, 16 kHz).
+         The last argument is the channel UUID, sent as the first text message. -->
+    <extension name="pipecat_bench">
+      <condition field="destination_number" expression="^9999$">
+        <action application="answer"/>
+        <action application="set" data="STREAM_BUFFER_SIZE=20"/>
+        <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8765/ws mono 16k ${uuid})}"/>
+        <action application="log" data="INFO uuid_audio_stream -> ${stream_result}"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+  </context>
+</include>
