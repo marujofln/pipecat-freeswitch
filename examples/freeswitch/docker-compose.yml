@@ -31,3 +31,16 @@ services:
     volumes:
       - ./captures:/captures
     depends_on: [freeswitch]
+
+  # Packet capture for bench/rtp_wire.py (not started by default: docker compose --profile tools ...).
+  tcpdump:
+    profiles: [tools]
+    build:
+      dockerfile_inline: |
+        FROM debian:12-slim
+        RUN apt-get update && apt-get install -y --no-install-recommends tcpdump && rm -rf /var/lib/apt/lists/*
+        ENTRYPOINT ["tcpdump"]
+    network_mode: host
+    cap_add: [NET_RAW, NET_ADMIN]
+    volumes:
+      - ./captures:/captures

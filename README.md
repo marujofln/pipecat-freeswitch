@@ -41,7 +41,8 @@ pipecat-freeswitch/
 ├── bench/
 │   ├── echo_server.py      # phase 0 WebSocket echo/tone server + ESL player + control endpoints
 │   ├── esl.py              # minimal asyncio ESL client (standard library only)
-│   ├── run_experiments.py  # automated phase 0 experiments over loopback calls
+│   ├── run_experiments.py  # automated phase 0 experiments (SIP/RTP calls to itself, or loopback)
+│   ├── rtp_wire.py         # packet capture: RTP on the wire vs what the caller hears
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── examples/freeswitch/
@@ -49,7 +50,7 @@ pipecat-freeswitch/
 │   ├── docker-compose.yml  # FreeSWITCH + echo server
 │   ├── conf/               # minimal FreeSWITCH configuration (dialplan, SIP profile, event socket, ...)
 │   └── README.md           # how to run the bench and read the captures
-└── docs/                   # research notes and specification (Portuguese)
+└── docs/                   # research notes (research.md) and specification (specification.md)
 ```
 
 ## Phase 0 test bench
@@ -108,8 +109,8 @@ Experiment endpoints on the echo server (commands go over ESL):
     blocks); waiting for the last file's `CHANNEL_EXECUTE_COMPLETE` keeps the whole speech.
   - With blocks sent in real time and up to 50 ms of jitter, playback underruns are rare (0-1 per call, ~20 ms);
     a one-block prebuffer removes them.
-  - Open: over SIP, ~40 ms are lost right after the start of each talkspurt; not yet attributed to the sending or
-    the receiving side.
+  - The bench's receiving leg loses ~40 ms at the start of each talkspurt over SIP; a packet capture shows the RTP
+    sent toward the caller is complete, so this is receiver behavior, not the package's.
 
 ## Roadmap
 

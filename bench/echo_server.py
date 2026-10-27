@@ -2,7 +2,7 @@
 
 Accepts the module's WebSocket, records what arrives and answers with ``streamAudio`` blocks.
 Everything interesting is appended to ``$CAPTURE_DIR/<uuid>.jsonl`` with wall-clock timestamps so the
-experiments in docs/especificacao.md (Phase 0) can be read off afterwards.
+experiments in docs/specification.md (Phase 0) can be read off afterwards.
 
 Modes (env ``MODE``, or per call via ``POST /config``):
 

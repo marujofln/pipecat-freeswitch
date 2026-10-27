@@ -17,7 +17,10 @@ python3 bench/run_experiments.py                       # input, latency, break, 
 python3 bench/run_experiments.py -e latency --chunks 100,500
 python3 bench/run_experiments.py -e pacing,hangup       # real-time pacing and hang-up after speech
 python3 bench/run_experiments.py --endpoint loopback    # mod_loopback instead of SIP/RTP
+python3 bench/rtp_wire.py [--paced]                     # RTP on the wire vs what the caller hears
 ```
+
+`rtp_wire.py` needs the capture image: `docker compose --profile tools build tcpdump`.
 
 By default the runner places real SIP/RTP (PCMU) calls from FreeSWITCH to itself through the bench-only `bench`
 profile (127.0.0.1:5090, no auth, not reachable from the network). The caller leg plays a 1 kHz tone and records
@@ -129,7 +132,8 @@ drops the connection.
   bounded by the largest delay seen in the call, rounded up to a 20 ms frame.
 - A one-block prebuffer removes them unless the jitter exceeds the block (40 ms blocks, 50 ms jitter), at the cost
   of one block of latency. First audio is about `block + 25-90 ms`, plus one block with the prebuffer.
-- Each underrun is heard as a ~60 ms hole: the ~20 ms gap plus the start-of-talkspurt loss below.
+- On the wire an underrun is a ~20 ms gap (a new talkspurt: marker bit and timestamp jump). The bench's caller leg
+  hears ~60 ms, because the receiving FreeSWITCH drops more (see below).
 
 **Hang-up after speech** (SIP, paced 3 s tone in 200 ms blocks):
 
@@ -140,10 +144,19 @@ drops the connection.
 
 An immediate kill on `EndFrame` cuts the end of the bot's speech; waiting for the last file to finish does not.
 
-### Open: ~40 ms lost at the start of a talkspurt (SIP)
+### ~40 ms lost at the start of a talkspurt: on the receiving side (SIP)
 
-Over SIP, when playback starts after silence the caller loses ~40 ms right after the first 20 ms (once per call
-with `sendmsg` and burst sending; at every file with `uuid_broadcast`, since each file follows 100 ms of silence).
-Paced runs show one more ~40 ms hole that is not located yet. In this bench the receiver is FreeSWITCH itself, so it
-is not yet known whether the loss happens when FreeSWITCH sends or when it receives; the write-only recording of the
-sending leg was not usable. Needs an external RTP receiver (pjsua or a packet capture).
+Over SIP the bench's caller leg loses ~40 ms right after the first 20 ms whenever audio resumes after silence (once
+per call with `sendmsg` and burst sending; at every file with `uuid_broadcast`), and paced runs show one more ~40 ms
+hole a few hundred ms after a resume.
+
+`bench/rtp_wire.py` captures the RTP on `lo` and decodes the PCMU sent by the streaming leg (ramp envelope per block):
+
+| | Burst, 1 s | Paced, 3 s |
+|---|---|---|
+| RTP sent | 50 packets, no sequence gaps, no timestamp jumps, ramp complete | 150 packets, one 20 ms underrun (marker + timestamp jump), otherwise complete |
+| Caller hears | 40 ms missing at 20-60 ms | 40 ms at 20-60 ms, 60 ms at the underrun, 40 ms more ~360 ms later (not on the wire) |
+
+**The sending side (the package's role) is clean; the extra loss happens in the FreeSWITCH that receives** (in this
+bench, the caller leg). Real callers receive through a phone, carrier or SBC, not this leg. It matters only if the
+bot's FreeSWITCH sends to another FreeSWITCH, and then it is that receiver's behavior. Not investigated further.
