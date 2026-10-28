@@ -380,6 +380,11 @@ The bench README documents the phase 0 measurements that shaped the design: why 
 Pipecat 1.14.0, FreeSWITCH 1.11.3 (phase 0 results also reproduced on 1.10.12), mod_audio_stream `da8b068`
 (community edition), Python 3.12. Codecs tested end to end: PCMU and Opus.
 
+## Contributing
+
+Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report security vulnerabilities privately,
+as described in [SECURITY.md](SECURITY.md).
+
 ## License
 
 BSD-2-Clause, same as Pipecat. See [LICENSE](LICENSE).
