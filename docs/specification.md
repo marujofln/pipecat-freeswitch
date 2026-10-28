@@ -2,6 +2,8 @@
 
 Technical design defined in the 2026-10-27 session, revised the same day with the Phase 0 results
 (bench in `examples/freeswitch/`, numbers in `examples/freeswitch/README.md`) and implemented in v0.1.0.
+Revised on 2026-10-28 after the project review: UUID validation and WebSocket token, output rate default,
+file-name fallback, `cleanup()`, temp files.
 
 ## Goal
 
@@ -47,12 +49,34 @@ and credential. The Pipecat guide's recommendation ("hang up through the native 
 REST providers; on FreeSWITCH the native control API is ESL.
 
 - One ESL connection per call: opened in the serializer's `setup()`, `filter Unique-ID <uuid>` as soon as the UUID
-  arrives, closed when the call ends.
+  arrives. It is closed on `EndFrame`/`CancelFrame`, by `serializer.cleanup()` when the WebSocket closes first, and by
+  the control itself on `CHANNEL_HANGUP_COMPLETE`, so it never outlives the call (see
+  [Ending the call](#ending-the-call-2026-10-28)).
 - Own client on plain asyncio (based on `bench/esl.py`), no new dependency.
 - Security: ESL amounts to full control of FreeSWITCH (as does `mod_xml_rpc`'s `/webapi`); require a private
   network, an ACL and a dedicated password, and document it.
 - v0.2: outbound ESL (`socket bot:8084 async full` in the dialplan) as a deployment alternative that does not expose
   port 8021.
+
+### Security of the WebSocket (2026-10-28)
+
+The first WebSocket message names the channel the serializer controls, and that name goes into ESL commands.
+
+- **UUID validation.** `FreeSWITCHControl.start()` and the serializer accept only canonical UUIDs (8-4-4-4-12 hex,
+  `control.is_valid_uuid`). Before this, a newline in the "UUID" started another ESL command (e.g. `api system ...`):
+  remote command execution for anyone who could reach the WebSocket. A malformed `call_uuid` raises `ValueError`; a
+  malformed first message is logged and ignored. Trade-off: custom `origination_uuid` values in another format are
+  rejected.
+- **Bearer token on the handshake.** Validation does not stop a client from naming another call's valid UUID. So
+  FreeSWITCH sends `Authorization: Bearer <bot_token>` through mod_audio_stream's `STREAM_EXTRA_HEADERS` (a JSON
+  object of handshake headers; the module's libwsc client also keeps a URL's query string, but a header stays out of
+  logs). The bot checks it before `accept()`, with `secrets.compare_digest`, and closes with 1008 (HTTP 403)
+  otherwise. This lives in the application (`examples/bot.py`), not in the package: the serializer never sees the
+  HTTP request. The README documents generation, configuration and rotation.
+- **Limits.** Over `ws://` the token travels in clear text (use `wss://`, `STREAM_TLS_*`, or a private network). A
+  single shared token lets its holder name any call; a per-call token (HMAC of the UUID) is a possible v0.2 item.
+- The bench applies the same rules: `bench/tone_bot.py` requires the token (`bench-token`), and
+  `bench/echo_server.py` listens on `127.0.0.1` and rejects non-canonical UUIDs.
 
 ## Repository layout
 
@@ -73,8 +97,11 @@ pipecat-freeswitch/
 │       └── conf/               # dialplan, SIP profiles, modules.conf.xml, event_socket.conf.xml
 ├── tests/
 │   ├── test_serializer.py
-│   └── fake_esl.py         # fake event socket used by the unit tests
-├── .github/workflows/      # lint, tests, PyPI release
+│   ├── test_control.py     # error paths of FreeSWITCHControl
+│   ├── test_esl.py         # error paths of ESLConnection, event parsing
+│   ├── test_integration.py # real pipeline + FastAPIWebsocketTransport on uvicorn, client playing mod_audio_stream
+│   └── fake_esl.py         # fake event socket (error replies, drops, auto-completed playback, open-connection count)
+├── .github/workflows/      # lint, unit and integration tests with branch coverage (fail under 95%)
 ├── CHANGELOG.md
 ├── LICENSE                 # BSD-2
 ├── README.md
@@ -105,35 +132,60 @@ therefore queues ahead of playback during speech, which removes the underrun ris
 class FreeSWITCHFrameSerializer(FrameSerializer):
     """Serializer for FreeSWITCH mod_audio_stream (open source edition)."""
 
-    # args: call_uuid (optional), esl_host, esl_port, esl_password, params, control (optional)
-    # params: freeswitch_sample_rate (8000), sample_rate, auto_hang_up (True), hang_up_timeout_secs (30)
+    # args: call_uuid (optional, canonical UUID), esl_host, esl_port, esl_password, params, control (optional)
+    # params: freeswitch_sample_rate (8000), freeswitch_in_sample_rate (-> freeswitch_sample_rate),
+    #   freeswitch_out_sample_rate (-> freeswitch_sample_rate; 8000/16000/24000/32000 raw, 48000 WAV),
+    #   output_resampler_quality ("QQ"), sample_rate, auto_hang_up (True), hang_up_timeout_secs (30)
+    #   Rates are validated in the constructor.
 
     # setup(): connect the control if call_uuid is known (setup runs twice: input and output transport)
     # deserialize: FreeSWITCH -> Pipecat
-    #   first text message -> channel UUID (plain or {"uuid": ...}) -> control.start(uuid)
+    #   first text message -> channel UUID (plain or {"uuid": ...}); only a canonical UUID -> control.start(uuid)
     #   binary L16         -> InputAudioRawFrame (resampled to the pipeline rate)
     #
     # serialize: Pipecat -> FreeSWITCH
-    #   OutputAudioRawFrame  -> {"type":"streamAudio","data":{"audioDataType":"raw","sampleRate":N,"audioData":b64}}
+    #   OutputAudioRawFrame  -> {"type":"streamAudio","data":{"audioDataType":"raw"|"wav","sampleRate":N,"audioData":b64}}
+    #                           at freeswitch_out_sample_rate (resampled with SOXR "QQ" if the pipeline rate differs)
     #                           (held and merged into the next block until the control is ready)
     #   InterruptionFrame    -> control.interrupt(sent_messages): uuid_break all, drop stale files
     #   EndFrame             -> control.wait_for_playback() then uuid_kill (if auto_hang_up)
     #   CancelFrame          -> uuid_kill at once (if auto_hang_up)
+    #
+    # cleanup(): uuid_kill (if auto_hang_up and not done yet) and close the ESL connection; idempotent.
+    #   The application calls it from on_client_disconnected (see "Ending the call").
 ```
 
 ```python
 class FreeSWITCHControl:
     """ESL client: plays files announced by mod_audio_stream and sends break/kill."""
 
-    # start(uuid): connect, filter Unique-ID <uuid>, subscribe
+    # start(uuid): reject a non-canonical UUID (ValueError); connect, filter Unique-ID <uuid>, subscribe
     #   CHANNEL_EXECUTE_COMPLETE CHANNEL_HANGUP_COMPLETE CUSTOM mod_audio_stream::play (guarded by a lock)
     # on play event -> sendmsg <uuid> execute playback <file> (no lead-frames), unless the file index is
-    #   below the message count at the last interruption
+    #   below the message count at the last interruption; the index comes from the file name, or from
+    #   the arrival order if the name does not match <uuid>_<n>.tmp.<ext> (one-time warning)
+    # on CHANNEL_HANGUP_COMPLETE -> mark the channel gone, wake waiters, close the connection
     # interrupt(sent)            -> api uuid_break <uuid> all; drop files with index < sent
     # wait_for_playback(sent, t) -> until every file up to index sent-1 was announced and finished,
     #                               the channel hung up, or the timeout
     # hang_up()                  -> api uuid_kill <uuid>
+    # ESL errors (command refused, connection lost) are logged, never raised to the pipeline; a lost
+    #   connection counts as the channel gone, so nothing waits for it.
 ```
+
+### Ending the call (2026-10-28)
+
+The serializer ends the call when the transport passes it `EndFrame` (wait for playback, then `uuid_kill`) or
+`CancelFrame` (`uuid_kill` at once). But once the WebSocket is closed, `FastAPIWebsocketOutputTransport._write_frame`
+returns before calling the serializer, so a WebSocket that closes first (caller hang-up, network drop) never delivers
+the `CancelFrame`. Found by the in-process integration tests: without a fix, that left the ESL connection open and, if
+the call was still up, the call parked. Two safeguards:
+
+- `serializer.cleanup()`, which the application calls from `on_client_disconnected` after `worker.cancel()`
+  (`examples/bot.py`, `bench/tone_bot.py`, README). No Pipecat transport calls a serializer's cleanup, so this is the
+  application's job until Pipecat does it (worth an upstream issue).
+- `FreeSWITCHControl` closes its own connection on `CHANNEL_HANGUP_COMPLETE`, so the connection never outlives the call
+  even if the application forgets `cleanup()`.
 
 Points of attention:
 - **Block size:** with `sendmsg` there is no fixed cost per file, so blocks can be small (40 ms tested end to end
@@ -144,6 +196,18 @@ Points of attention:
   files `<uuid>_<n>` with `n` increasing per `streamAudio` (`audio_streamer_glue.cpp:430`); the serializer counts
   the `streamAudio` messages it sent and, on a break, drops `play` events whose `n` is below that count. This relies
   on a module internal (regression test + pinned version); a message that fails to decode does not increment `n`.
+  If a file name ever stops matching the scheme, the control numbers files in arrival order (which is the send
+  order) and logs a warning once, so hang-up and stale-audio dropping keep working.
+- **Temp files stay on disk until the stream ends** (mod_audio_stream `da8b068`, `audio_streamer_glue.cpp`). The
+  module writes each `streamAudio` block to `<temp_dir>/<uuid>_<n>.tmp.<ext>` (`$${temp_dir}`, usually `/tmp`),
+  records the path in `m_Files` (lines 426–455), and deletes them all in `deleteFiles()` (lines 68–83), called only
+  from `stream_session_cleanup` (lines 939, 994): on `uuid_audio_stream ... stop` or when the channel closes. Nothing is
+  deleted after it has played. So during a call the files pile up: one per block of bot speech, i.e. 1,500 per
+  minute of speech with 40 ms blocks (300 with 200 ms blocks), about 0.96 MB per minute of speech at 8 kHz raw,
+  1.9 MB at 16 kHz, and 5.8 MB at 48 kHz WAV, whatever the block size. Small blocks multiply the file count, not the
+  bytes. If FreeSWITCH crashes, the files of calls in progress stay behind. The package cannot delete them, since it
+  does not own the files and runs on another host. This matters for long calls and many concurrent calls (temp
+  directory size and inode count), and it is part of the block-size trade-off.
 - **Playback queue running dry with real-time sending (measured over SIP, 2026-10-27).** With 40–200 ms blocks and up
   to 50 ms of random delay: 0–1 underrun per call, ~20 ms each. The queue self-heals (after one late block,
   playback runs that much later and gains margin), so total silence is bounded by the largest delay in the call.
@@ -167,12 +231,16 @@ Points of attention:
 - **Hang-up:** `uuid_kill` tears the channel down in ~20 ms and the WebSocket closes in ~15 ms. The module does not
   raise `mod_audio_stream::disconnect` on hang-up, only when the server closes the connection.
 - **Deployment:** the bench's ESL listens on `127.0.0.1` only. In production the bot needs access to the event socket
-  (ACL + password); document it in the README.
+  (ACL + password), documented in the README, and the WebSocket needs the token (see
+  [Security of the WebSocket](#security-of-the-websocket-2026-10-28)).
 - **Sample rates (measured 2026-10-27, PCMU and Opus):** bot audio must reach FreeSWITCH at the channel rate;
   per-file resampling in FreeSWITCH leaves artefacts at every seam. Opus runs at 48 kHz inside FreeSWITCH, and raw
   audio cannot be played at 48 kHz (`.r48` is not a mod_sndfile format), so 48 kHz goes as WAV. Resampling in the
   serializer must hold nothing back (SOXR "QQ"): nothing flushes the resampler at the end of an utterance. Input and
   output rates are separate parameters (16 kHz caller audio for STT/VAD, 48 kHz bot audio on Opus).
+  `freeswitch_out_sample_rate` defaults to `freeswitch_sample_rate` (8000), not to the pipeline rate: a 24 kHz TTS on
+  a G.711 channel is resampled by the serializer (0 glitchy windows on the bench) instead of block by block by
+  FreeSWITCH (71 of 286). Opus channels set `freeswitch_out_sample_rate=48000`.
 - **ptime:** measurements used 20 ms. With another ptime the `uuid_broadcast` gap would change (5 × ptime); with
   `sendmsg` it should not matter, but check it in the harness with different codecs.
 
@@ -200,8 +268,9 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
   Answered: L16 arrival, latency per block size, source of the 100 ms gap (`uuid_broadcast`'s `lead-frames`),
   `uuid_break` with and without `all`, `uuid_kill`, real-time pacing, hang-up after speech.
 - **v0.1 (implemented on 2026-10-27):** serializer + control (ESL), `bot.py` example, README, CHANGELOG, unit tests,
-  end-to-end test on the bench. Still to do for listing: PyPI release, 30–60 s video with an interruption, PR to the
-  Pipecat docs.
+  end-to-end test on the bench. Revised on 2026-10-28 after the project review (security fixes, rate default,
+  `cleanup()`, error-path and in-process integration tests, explicit sdist contents). Still to do for listing: PyPI
+  release, 30–60 s video with an interruption, PR to the Pipecat docs.
 - **v0.2:** DTMF (ESL or a dialplan bind), adapters for `mod_audio_fork` and `mod_earshot`'s native protocol.
 - **v0.3:** latency metrics (time to first audio per block size).
 

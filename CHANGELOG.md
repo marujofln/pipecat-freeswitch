@@ -18,6 +18,13 @@ All notable changes to this project are documented here. The format follows
   malformed events), and in-process integration tests that run a real Pipecat pipeline behind
   `FastAPIWebsocketTransport` with a client playing mod_audio_stream. CI enforces 95% branch coverage.
 
+### Documentation
+
+- `docs/specification.md` revised after the project review: parameters and rate defaults, UUID validation and
+  WebSocket token, ending the call (`cleanup()`, connection closed on hang-up), file-name fallback, tests layout.
+- README and specification: mod_audio_stream keeps every block file in the temp directory until the call's stream
+  ends (1,500 files per minute of bot speech with 40 ms blocks); size the temp directory and clean up after crashes.
+
 ### Changed
 
 - `freeswitch_out_sample_rate` defaults to `freeswitch_sample_rate` (8000) and is validated when the serializer is

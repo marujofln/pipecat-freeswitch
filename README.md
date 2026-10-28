@@ -215,6 +215,14 @@ FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks agains
 - The serializer relies on mod_audio_stream naming files `<uuid>_<n>.tmp.<ext>` in send order to drop stale audio
   after an interruption; this was verified on commit `da8b068`. If a file name does not follow that scheme, the
   serializer logs a warning and numbers files in the order their `play` events arrive, which is the send order.
+- **Temp files stay on disk until the call ends.** mod_audio_stream writes every block of bot speech to
+  `<temp_dir>/<uuid>_<n>.tmp.<ext>` (FreeSWITCH's `$${temp_dir}`, usually `/tmp`) and deletes a call's files only when
+  its stream stops or the channel closes, not after each one plays. Per minute of bot speech that is 1,500 files with
+  40 ms blocks (300 with 200 ms blocks) and about 1 MB at 8 kHz, 2 MB at 16 kHz or 6 MB at 48 kHz, whatever the block
+  size. Size the temp directory (space and inodes) for long calls and concurrent calls. If FreeSWITCH crashes, the files
+  of the calls in progress stay behind. A periodic cleanup handles them, with an age above your longest call so it
+  never touches a live one, e.g. `find /tmp -maxdepth 1 -name '*-*-*-*-*_*.tmp.*' -mmin +240 -delete`. The package
+  cannot delete them itself: the files belong to FreeSWITCH, on its host.
 
 ## Example
 
