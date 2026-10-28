@@ -44,6 +44,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The sdist picked up local working files: 315 bench captures (3 MB of WAV and JSONL, ignored by git through
+  `examples/freeswitch/captures/.gitignore`, which hatch does not read) and `CLAUDE.md`. It now lists its contents
+  explicitly: the package, the tests, `examples/bot.py`, README, CHANGELOG and LICENSE (30 KB).
+
 - A WebSocket that closed before the pipeline ended (caller hang-up, network drop) left the event socket connection
   open and, if the call was still up, the call parked: the transport stops passing frames to the serializer once
   the WebSocket is closed, so `CancelFrame` never reached it. New `FreeSWITCHFrameSerializer.cleanup()` hangs up

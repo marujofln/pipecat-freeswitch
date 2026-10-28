@@ -49,6 +49,18 @@ bench = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/pipecat_freeswitch"]
 
+# An explicit list: hatch only honors the root .gitignore, so without it the sdist picked up local bench
+# captures (examples/freeswitch/captures/ has its own .gitignore) and other working files.
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/pipecat_freeswitch",
+    "tests",
+    "examples/bot.py",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
