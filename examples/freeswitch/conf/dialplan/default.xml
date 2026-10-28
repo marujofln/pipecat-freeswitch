@@ -21,7 +21,16 @@
         <action application="park"/>
       </condition>
     </extension>
-    <!-- 9997: same bot, caller audio streamed at 16 kHz (wideband codecs such as Opus). -->
+    <!-- 9996: the example voice bot (examples/bot.py, service "bot" in docker-compose.yml), 8 kHz. -->
+    <extension name="pipecat_voice_bot">
+      <condition field="destination_number" expression="^9996$">
+        <action application="answer"/>
+        <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
+        <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8767/ws mono 8k ${uuid})}"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+    <!-- 9997: same tone bot as 9998, caller audio streamed at 16 kHz (wideband codecs such as Opus). -->
     <extension name="pipecat_bot_16k">
       <condition field="destination_number" expression="^9997$">
         <action application="answer"/>

@@ -21,7 +21,7 @@ network, since over plain ``ws://`` the token travels in clear text.
 
 The bot also needs the FreeSWITCH event socket (mod_event_socket) to play audio, barge in and
 hang up. Environment: BOT_TOKEN, DEEPGRAM_API_KEY, OPENAI_API_KEY, and optionally
-FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD.
+FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD, HOST (0.0.0.0) and PORT (8765).
 
 The text-to-speech service is chosen with TTS_PROVIDER:
 
@@ -77,6 +77,20 @@ OUTPUT_RATE = 8000
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Set BOT_TOKEN to the token FreeSWITCH sends (bot_token in vars.xml)")
+
+# Fail at startup, not in the middle of the first call, when a service key is missing.
+_TTS_KEYS = {
+    "cartesia": ["CARTESIA_API_KEY"],
+    "elevenlabs": ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"],
+}
+_missing = [
+    name
+    for name in ["DEEPGRAM_API_KEY", "OPENAI_API_KEY"]
+    + _TTS_KEYS.get(os.getenv("TTS_PROVIDER", "cartesia").lower(), [])
+    if not os.getenv(name)
+]
+if _missing:
+    raise RuntimeError(f"Set {', '.join(_missing)} (see .env.example)")
 
 app = FastAPI()
 
@@ -211,4 +225,4 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8765")))
+    uvicorn.run(app, host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8765")))

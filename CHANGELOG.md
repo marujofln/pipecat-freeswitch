@@ -24,6 +24,11 @@ All notable changes to this project are documented here. The format follows
 - Release workflow: publishes to PyPI through trusted publishing when a `v*` tag matching the version is pushed.
 - The package ships `py.typed`. Python 3.13 classifier.
 - A warning, once per process, when the event socket is used with FreeSWITCH's default password ("ClueCon").
+- The example voice bot runs in Docker: `examples/bot.Dockerfile` and a `bot` service in the bench's compose file
+  (profile `bot`, extension `9996`, keys from the repository's `.env`), so a softphone call reaches the full
+  STT → LLM → TTS pipeline with one `docker compose` command. `.env.example` lists the variables.
+- `examples/bot.py` checks the service keys at startup instead of failing in the first call, and reads `HOST`
+  (default `0.0.0.0`) as well as `PORT`.
 
 ### Documentation
 

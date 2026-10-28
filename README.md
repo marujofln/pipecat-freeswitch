@@ -255,7 +255,13 @@ service in Pipecat supports PCM output at 8, 16, 24, 32 and 48 kHz (`pcm_8000` .
 checked in Pipecat's code, but neither provider has been run against its live API here.
 
 Point the dialplan's `uuid_audio_stream` at `ws://BOT_HOST:8765/ws mono 8k ${uuid}`, with `STREAM_EXTRA_HEADERS`
-set as in [FreeSWITCH setup](#freeswitch-setup). The bot refuses to start without `BOT_TOKEN`.
+set as in [FreeSWITCH setup](#freeswitch-setup). The bot refuses to start without `BOT_TOKEN` or a service key;
+[`.env.example`](.env.example) lists the variables.
+
+**Try it with a phone call, all in Docker:** the bench runs the bot as its `bot` service on extension `9996`. Copy
+`.env.example` to `.env` and fill in the keys, run `docker compose --profile bot up -d --build` in
+`examples/freeswitch`, register a softphone as `1000` / `1234` on port 5060, and dial `9996`. See
+[the bench README](examples/freeswitch/README.md#talking-to-the-voice-bot-9996).
 
 ## Development
 

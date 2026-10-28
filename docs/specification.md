@@ -91,9 +91,10 @@ pipecat-freeswitch/
 │                           #        tone_bot.py + run_e2e.py (end-to-end test of the serializer)
 ├── examples/
 │   ├── bot.py              # foundational single-file example
+│   ├── bot.Dockerfile      # image of bot.py with the package from this repository (+ .dockerignore allowlist)
 │   └── freeswitch/
 │       ├── Dockerfile          # FreeSWITCH 1.11.3 built from source + mod_audio_stream + mod_loopback
-│       ├── docker-compose.yml  # FreeSWITCH + bench server (later: + bot)
+│       ├── docker-compose.yml  # FreeSWITCH + echo server; voice bot (profile "bot", extension 9996)
 │       └── conf/               # dialplan, SIP profiles, modules.conf.xml, event_socket.conf.xml
 ├── tests/
 │   ├── test_serializer.py

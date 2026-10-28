@@ -1,0 +1,8 @@
+# The build context is the repository root, which holds .venv, captures and secrets (.env):
+# send only what bot.Dockerfile copies.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!examples/bot.py

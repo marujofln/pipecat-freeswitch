@@ -32,6 +32,24 @@ services:
       - ./captures:/captures
     depends_on: [freeswitch]
 
+  # The example voice bot (examples/bot.py, STT -> LLM -> TTS) on extension 9996. Needs API keys, so it only
+  # starts with its profile: docker compose --profile bot up -d. Keys come from the repository's .env.
+  bot:
+    profiles: [bot]
+    build:
+      context: ../..
+      dockerfile: examples/bot.Dockerfile
+    network_mode: host
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      HOST: 127.0.0.1             # FreeSWITCH shares the host network; nothing else needs to reach the bot
+      PORT: "8767"                # 8765 is the echo server, 8766 the bench's tone bot
+      BOT_TOKEN: bench-token      # must match bot_token in conf/vars.xml (overrides .env on purpose)
+      FREESWITCH_ESL_HOST: 127.0.0.1
+    depends_on: [freeswitch]
+
   # Packet capture for bench/rtp_wire.py (not started by default: docker compose --profile tools ...).
   tcpdump:
     profiles: [tools]

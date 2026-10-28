@@ -9,8 +9,34 @@ docker compose build        # first build compiles FreeSWITCH: ~15-30 min
 docker compose up
 ```
 
-Register a softphone as `1000` / `1234` against the host IP, port 5060, and dial `9999`, or run the
-automated experiments (no softphone needed, standard library only):
+Register a softphone as `1000` / `1234` against the host IP, port 5060 (codec PCMU or PCMA), and dial:
+
+| Extension | Served by | What you hear |
+|---|---|---|
+| `9999` | echo server (`bench/echo_server.py`, service `echo`) | your own voice, in 300 ms blocks |
+| `9998` | tone bot (`bench/tone_bot.py`, run it on the host) | a tone, then the bot hangs up |
+| `9997` | the same tone bot, caller audio at 16 kHz | the same, for wideband codecs (Opus) |
+| `9996` | the example voice bot (`examples/bot.py`, service `bot`) | a voice agent: Deepgram → OpenAI → Cartesia/ElevenLabs |
+
+### Talking to the voice bot (`9996`)
+
+The `bot` service runs `examples/bot.py` with the package installed from this repository. It needs API keys, so it
+only starts with its profile:
+
+```bash
+cp .env.example .env        # at the repository root; fill in DEEPGRAM_API_KEY, OPENAI_API_KEY, CARTESIA_API_KEY
+cd examples/freeswitch
+docker compose --profile bot up -d --build
+docker compose logs -f bot  # "Call <uuid> connected" when you dial 9996
+```
+
+The bot listens on `127.0.0.1:8767` and uses the bench's token (`bench-token`, `bot_token` in `conf/vars.xml`). It
+refuses to start if a key is missing. Interrupt it while it speaks to see barge-in. With `TTS_PROVIDER=elevenlabs` in
+`.env`, set `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` instead of the Cartesia key.
+
+### Automated experiments
+
+No softphone needed, standard library only:
 
 ```bash
 python3 bench/run_experiments.py                       # input, latency, break, kill
