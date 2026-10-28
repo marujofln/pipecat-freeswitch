@@ -211,8 +211,26 @@ async def test_separate_in_and_out_rates(esl_server):
     await serializer.serialize(CancelFrame())
 
 
-async def test_output_rate_defaults_to_pipeline_rate(esl_server):
+async def test_output_rate_defaults_to_freeswitch_rate_not_pipeline_rate(esl_server):
+    # A 24 kHz TTS on a G.711 channel: sending 24 kHz would make FreeSWITCH resample every block,
+    # with an artefact at each seam, so the serializer resamples to 8 kHz itself.
     serializer = make_serializer(esl_server)
+    await serializer.setup(SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=24000))
+    message = json.loads(await serializer.serialize(audio_frame(40, 24000)))
+    assert message["data"]["sampleRate"] == 8000
+    await serializer.serialize(CancelFrame())
+
+
+async def test_output_rate_follows_freeswitch_sample_rate(esl_server):
+    serializer = make_serializer(esl_server, freeswitch_sample_rate=16000)
+    await serializer.setup(SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=24000))
+    message = json.loads(await serializer.serialize(audio_frame(40, 24000)))
+    assert message["data"]["sampleRate"] == 16000
+    await serializer.serialize(CancelFrame())
+
+
+async def test_pipeline_rate_equal_to_output_rate_is_passed_through(esl_server):
+    serializer = make_serializer(esl_server, freeswitch_out_sample_rate=24000)
     await serializer.setup(SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=24000))
     message = json.loads(await serializer.serialize(audio_frame(40, 24000)))
     assert message["data"]["sampleRate"] == 24000 and message["data"]["audioDataType"] == "raw"
@@ -220,7 +238,7 @@ async def test_output_rate_defaults_to_pipeline_rate(esl_server):
     await serializer.serialize(CancelFrame())
 
 
-async def test_unplayable_pipeline_rate_falls_back(esl_server):
+async def test_unplayable_pipeline_rate_is_resampled(esl_server):
     serializer = make_serializer(esl_server, freeswitch_sample_rate=8000)
     await serializer.setup(SimpleNamespace(audio_in_sample_rate=16000, audio_out_sample_rate=22050))
     message = json.loads(await serializer.serialize(audio_frame(40, 22050)))
@@ -247,11 +265,16 @@ def test_rejects_unsupported_input_rate():
         )
 
 
-def test_rejects_unsupported_sample_rate():
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({"freeswitch_out_sample_rate": 64000}, id="out-rate"),
+        pytest.param({"freeswitch_sample_rate": 64000}, id="default-rate"),
+    ],
+)
+def test_rejects_unsupported_sample_rate(params):
     with pytest.raises(ValueError):
-        FreeSWITCHFrameSerializer(
-            params=FreeSWITCHFrameSerializer.InputParams(freeswitch_out_sample_rate=64000)
-        )
+        FreeSWITCHFrameSerializer(params=FreeSWITCHFrameSerializer.InputParams(**params))
 
 
 async def test_play_event_queues_playback_with_sendmsg(esl_server):
@@ -305,6 +328,46 @@ async def test_end_frame_waits_for_playback_before_hanging_up(esl_server):
     await esl_server.emit_playback_complete(UUID, 1)
     assert await asyncio.wait_for(end, 2) is None
     assert f"api uuid_kill {UUID}" in esl_server.commands
+
+
+def odd_path(index: int) -> str:
+    """A file name that does not follow mod_audio_stream's <uuid>_<n>.tmp.<ext> scheme."""
+    return f"/tmp/audio-{index}.r8"
+
+
+async def test_unexpected_file_name_does_not_stall_hang_up(esl_server):
+    serializer = make_serializer(esl_server, hang_up_timeout_secs=5)
+    await serializer.setup(SETUP)
+    for _ in range(2):
+        await serializer.serialize(audio_frame())
+    end = asyncio.create_task(serializer.serialize(EndFrame()))
+    for index in range(2):
+        await esl_server.emit_play(UUID, index, path=odd_path(index))
+    await asyncio.sleep(0.1)
+    assert len([c for c in esl_server.commands if c.startswith("sendmsg")]) == 2
+    for index in range(2):
+        await esl_server.emit_playback_complete(UUID, index, path=odd_path(index))
+    # Without arrival-order numbering this waited for the 5 s timeout.
+    assert await asyncio.wait_for(end, 1) is None
+    assert f"api uuid_kill {UUID}" in esl_server.commands
+
+
+async def test_unexpected_file_name_still_drops_stale_files(esl_server):
+    serializer = make_serializer(esl_server)
+    await serializer.setup(SETUP)
+    for _ in range(2):
+        await serializer.serialize(audio_frame())
+    await serializer.serialize(InterruptionFrame())
+    await esl_server.wait_for_command("api uuid_break")
+    for index in range(2):
+        await esl_server.emit_play(UUID, index, path=odd_path(index))
+    await serializer.serialize(audio_frame())
+    await esl_server.emit_play(UUID, 2, path=odd_path(2))
+    await esl_server.wait_for_command("sendmsg")
+    await asyncio.sleep(0.1)
+    sendmsgs = [c for c in esl_server.commands if c.startswith("sendmsg")]
+    assert len(sendmsgs) == 1 and odd_path(2) in sendmsgs[0]
+    await serializer.serialize(CancelFrame())
 
 
 async def test_end_frame_hangs_up_after_timeout(esl_server):

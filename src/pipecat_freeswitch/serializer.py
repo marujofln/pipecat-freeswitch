@@ -42,7 +42,9 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
 
     Bot audio should reach FreeSWITCH at the channel's rate (8000 for G.711,
     16000 for G.722, 48000 for Opus): FreeSWITCH resamples each played file on
-    its own, which adds artefacts at every block seam. The simplest setup runs
+    its own, which adds artefacts at every block seam. Bot audio is therefore
+    sent at ``freeswitch_out_sample_rate`` (by default ``freeswitch_sample_rate``,
+    8000), resampled by the serializer if needed. The simplest setup also runs
     the pipeline output at that rate (``PipelineParams.audio_out_sample_rate``),
     so nothing is resampled at all.
 
@@ -72,9 +74,9 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
                 to ``freeswitch_sample_rate``.
             freeswitch_out_sample_rate: Rate of the bot audio sent in
                 ``streamAudio``: 8000, 16000, 24000, 32000 (raw) or 48000 (WAV).
-                Should match the channel rate. Defaults to the pipeline output
-                rate when that is one of these, so no resampling happens;
-                otherwise to ``freeswitch_sample_rate``.
+                Should match the channel rate. Defaults to
+                ``freeswitch_sample_rate``. Bot audio at another rate is
+                resampled by the serializer.
             output_resampler_quality: SOXR quality used when bot audio must be
                 resampled. Defaults to "QQ", the only preset that holds back no
                 audio: higher presets keep up to ~110 ms inside the resampler,
@@ -128,13 +130,14 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         self._in_sample_rate = (
             self._params.freeswitch_in_sample_rate or self._params.freeswitch_sample_rate
         )
-        # Resolved in setup() when not given, from the pipeline output rate.
-        self._out_sample_rate = self._params.freeswitch_out_sample_rate or 0
+        self._out_sample_rate = (
+            self._params.freeswitch_out_sample_rate or self._params.freeswitch_sample_rate
+        )
         if self._in_sample_rate <= 0 or self._in_sample_rate % 8000:
             raise ValueError(
                 f"freeswitch_in_sample_rate must be a multiple of 8000, got {self._in_sample_rate}"
             )
-        if self._out_sample_rate and self._out_sample_rate not in _OUT_SAMPLE_RATES:
+        if self._out_sample_rate not in _OUT_SAMPLE_RATES:
             raise ValueError(
                 f"freeswitch_out_sample_rate must be one of {_OUT_SAMPLE_RATES}, "
                 f"got {self._out_sample_rate}"
@@ -175,16 +178,11 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             setup: Configuration object containing setup parameters.
         """
         self._sample_rate = self._params.sample_rate or setup.audio_in_sample_rate
-        if not self._out_sample_rate:
-            pipeline_out = setup.audio_out_sample_rate
-            if pipeline_out in _OUT_SAMPLE_RATES:
-                self._out_sample_rate = pipeline_out
-            else:
-                self._out_sample_rate = self._params.freeswitch_sample_rate
-                logger.warning(
-                    f"{self}: pipeline output rate {pipeline_out} cannot be played by FreeSWITCH, "
-                    f"resampling bot audio to {self._out_sample_rate}"
-                )
+        if setup.audio_out_sample_rate != self._out_sample_rate:
+            logger.debug(
+                f"{self}: resampling bot audio from {setup.audio_out_sample_rate} "
+                f"to {self._out_sample_rate}"
+            )
         if self._call_uuid and not self._control.started:
             await self._control.start(self._call_uuid)
 

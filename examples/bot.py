@@ -135,7 +135,9 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
         esl_host=os.getenv("FREESWITCH_ESL_HOST", "127.0.0.1"),
         esl_port=int(os.getenv("FREESWITCH_ESL_PORT", "8021")),
         esl_password=os.getenv("FREESWITCH_ESL_PASSWORD", "ClueCon"),
-        params=FreeSWITCHFrameSerializer.InputParams(freeswitch_in_sample_rate=STREAM_RATE),
+        params=FreeSWITCHFrameSerializer.InputParams(
+            freeswitch_in_sample_rate=STREAM_RATE, freeswitch_out_sample_rate=OUTPUT_RATE
+        ),
     )
 
     transport = FastAPIWebsocketTransport(

@@ -81,6 +81,7 @@ class FreeSWITCHControl:
         self._last_index = -1
         # Files queued for playback that have not finished yet.
         self._pending: set[str] = set()
+        self._warned_file_name = False
         self._channel_gone = False
         self._changed = asyncio.Condition()
         # The input and output transports both set up the serializer, possibly at the same time.
@@ -224,9 +225,20 @@ class FreeSWITCHControl:
             logger.warning(f"{self}: mod_audio_stream::play event without a file: {event}")
             return
         match = _FILE_INDEX.search(path)
-        index = int(match.group(1)) if match else None
+        if match:
+            index = int(match.group(1))
+        else:
+            # Files are announced in send order, so the next index is the one this file has.
+            # Without it, the hang-up would wait for this file until it timed out.
+            index = self._last_index + 1
+            if not self._warned_file_name:
+                self._warned_file_name = True
+                logger.warning(
+                    f"{self}: unexpected mod_audio_stream file name {path}, "
+                    "numbering files in arrival order"
+                )
 
-        if index is not None and index < self._discard_below:
+        if index < self._discard_below:
             logger.trace(f"{self}: dropping {path}, sent before the last interruption")
         else:
             assert self._conn is not None
@@ -239,8 +251,7 @@ class FreeSWITCHControl:
                     self._pending.discard(path)
 
         async with self._changed:
-            if index is not None:
-                self._last_index = max(self._last_index, index)
+            self._last_index = max(self._last_index, index)
             self._changed.notify_all()
 
     def __str__(self) -> str:

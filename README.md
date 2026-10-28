@@ -139,7 +139,7 @@ the event socket is ready. Reading it yourself, as above, lets the serializer co
 |---|---|---|
 | `freeswitch_sample_rate` | `8000` | Default rate for both directions |
 | `freeswitch_in_sample_rate` | `freeswitch_sample_rate` | Caller audio rate, as given to `uuid_audio_stream` (`8k`, `16k`) |
-| `freeswitch_out_sample_rate` | pipeline output rate | Bot audio rate: 8000, 16000, 24000, 32000 (raw) or 48000 (sent as WAV) |
+| `freeswitch_out_sample_rate` | `freeswitch_sample_rate` | Bot audio rate, the channel's: 8000, 16000, 24000, 32000 (raw) or 48000 (sent as WAV) |
 | `output_resampler_quality` | `"QQ"` | SOXR preset used only if bot audio must be resampled |
 | `sample_rate` | `None` | Override for the pipeline input rate |
 | `auto_hang_up` | `True` | Hang up on `EndFrame` (after playback) and `CancelFrame` (at once) |
@@ -156,13 +156,16 @@ rate). The simplest setup runs the pipeline output at that rate, so nothing is r
 
 | Channel codec | `uuid_audio_stream` | `PipelineParams` | Serializer |
 |---|---|---|---|
-| PCMU / PCMA | `mono 8k` | `audio_in_sample_rate=8000, audio_out_sample_rate=8000` | `freeswitch_in_sample_rate=8000` |
-| Opus (48 kHz inside FreeSWITCH) | `mono 16k` | `audio_in_sample_rate=16000, audio_out_sample_rate=48000` | `freeswitch_in_sample_rate=16000` |
-| G.722 | `mono 16k` | `audio_in_sample_rate=16000, audio_out_sample_rate=16000` | `freeswitch_in_sample_rate=16000` |
+| PCMU / PCMA | `mono 8k` | `audio_in_sample_rate=8000, audio_out_sample_rate=8000` | defaults (`freeswitch_sample_rate=8000`) |
+| Opus (48 kHz inside FreeSWITCH) | `mono 16k` | `audio_in_sample_rate=16000, audio_out_sample_rate=48000` | `freeswitch_in_sample_rate=16000, freeswitch_out_sample_rate=48000` |
+| G.722 | `mono 16k` | `audio_in_sample_rate=16000, audio_out_sample_rate=16000` | `freeswitch_sample_rate=16000` |
 
 - **Caller audio** is resampled by mod_audio_stream from the channel rate to the stream rate. With Opus, `16k` keeps
   wideband speech for STT and VAD (Silero accepts 8 or 16 kHz); `8k` throws Opus's extra bandwidth away.
 - **Bot audio** at 48 kHz is sent as WAV, because FreeSWITCH plays raw audio only at 8, 16, 24 and 32 kHz.
+- Bot audio is always sent at `freeswitch_out_sample_rate` (8000 unless set), never at the pipeline rate as such:
+  a 24 kHz TTS on a G.711 channel is resampled to 8 kHz by the serializer, which on the bench gave no glitches,
+  instead of being resampled block by block by FreeSWITCH.
 - If the pipeline output rate differs from `freeswitch_out_sample_rate`, the serializer resamples with SOXR "QQ":
   higher presets hold back up to ~110 ms, and since nothing flushes the resampler after an utterance, its end would
   be lost. "QQ" has the weakest anti-aliasing; prefer letting the TTS produce the channel rate.
@@ -180,7 +183,8 @@ FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks agains
 - Pipecat's WebSocket transport sends audio about twice as fast as real time, so FreeSWITCH queues ahead of playback
   and `BotStoppedSpeakingFrame` can arrive before the caller has heard the end of the speech.
 - The serializer relies on mod_audio_stream naming files `<uuid>_<n>.tmp.<ext>` in send order to drop stale audio
-  after an interruption; this was verified on commit `da8b068`.
+  after an interruption; this was verified on commit `da8b068`. If a file name does not follow that scheme, the
+  serializer logs a warning and numbers files in the order their `play` events arrive, which is the send order.
 
 ## Example
 

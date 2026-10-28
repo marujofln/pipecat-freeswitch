@@ -64,24 +64,30 @@ class FakeESLServer:
             writer.write(message.encode())
             await writer.drain()
 
-    async def emit_play(self, uuid: str, index: int, ext: str = "r8"):
+    async def emit_play(self, uuid: str, index: int, ext: str = "r8", path: str | None = None):
         """Emit mod_audio_stream::play for the file of the ``index``-th streamAudio message."""
         body = json.dumps(
-            {"audioDataType": "raw", "sampleRate": 8000, "file": play_path(uuid, index, ext)}
+            {
+                "audioDataType": "raw",
+                "sampleRate": 8000,
+                "file": path or play_path(uuid, index, ext),
+            }
         )
         await self.emit(
             {"Event-Name": "CUSTOM", "Event-Subclass": "mod_audio_stream::play", "Unique-ID": uuid},
             body,
         )
 
-    async def emit_playback_complete(self, uuid: str, index: int, ext: str = "r8"):
+    async def emit_playback_complete(
+        self, uuid: str, index: int, ext: str = "r8", path: str | None = None
+    ):
         """Emit CHANNEL_EXECUTE_COMPLETE for the playback of one file."""
         await self.emit(
             {
                 "Event-Name": "CHANNEL_EXECUTE_COMPLETE",
                 "Unique-ID": uuid,
                 "Application": "playback",
-                "Application-Data": play_path(uuid, index, ext),
+                "Application-Data": path or play_path(uuid, index, ext),
             }
         )
 

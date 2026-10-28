@@ -17,8 +17,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- `freeswitch_out_sample_rate` defaults to the pipeline output rate when FreeSWITCH can play it, so bot audio is
-  not resampled. 64 kHz is no longer accepted.
+- `freeswitch_out_sample_rate` defaults to `freeswitch_sample_rate` (8000) and is validated when the serializer is
+  built. Bot audio at another pipeline rate (e.g. a 24 kHz TTS) is resampled by the serializer to the channel rate,
+  rather than sent as is and resampled by FreeSWITCH block by block, with an artefact at every seam. Opus channels
+  need `freeswitch_out_sample_rate=48000`. 64 kHz is no longer accepted.
 
 ### Security
 
@@ -32,6 +34,10 @@ All notable changes to this project are documented here. The format follows
   the need for `wss://` or a private network. `bench/run_e2e.py` gains an `auth` scenario.
 
 ### Fixed
+
+- A `mod_audio_stream::play` file whose name did not match `<uuid>_<n>.tmp.<ext>` was played but never counted, so
+  hang-up on `EndFrame` waited for `hang_up_timeout_secs`. Such files are now numbered in arrival order (with a
+  warning), which also keeps dropping stale audio after an interruption.
 
 - Bot audio resampled by the serializer lost the end of each utterance: the default SOXR "VHQ" stream resampler
   holds back up to ~110 ms, which nothing flushes, and clears it after 0.2 s of inactivity. Output resampling now
