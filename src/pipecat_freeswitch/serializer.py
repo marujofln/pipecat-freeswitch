@@ -12,7 +12,7 @@ import json
 from loguru import logger
 from pipecat.audio.resamplers.base_audio_resampler import SoxrQuality
 from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
-from pipecat.audio.utils import create_stream_resampler, pcm_to_wav
+from pipecat.audio.utils import create_stream_resampler, pcm_to_wav, scale_audio
 from pipecat.frames.frames import (
     AudioRawFrame,
     CancelFrame,
@@ -86,6 +86,13 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
                 audio: higher presets keep up to ~110 ms inside the resampler,
                 and the end of each utterance would be lost because nothing
                 flushes it.
+            output_gain_db: Gain applied to bot audio before it is sent, in dB
+                (negative to attenuate), with samples clipped to 16 bits.
+                Defaults to 0 (unchanged). TTS services often deliver speech
+                far louder than telephone level (about -26 dBFS active speech,
+                ITU-T P.56): too loud, it distorts on phones and makes their
+                echo suppression gate the caller's microphone, which defeats
+                barge-in.
             sample_rate: Optional override for the pipeline input sample rate.
             auto_hang_up: Whether to hang up the call on EndFrame or CancelFrame.
             hang_up_timeout_secs: Maximum time to wait on EndFrame for queued
@@ -97,6 +104,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         freeswitch_in_sample_rate: int | None = None
         freeswitch_out_sample_rate: int | None = None
         output_resampler_quality: SoxrQuality = "QQ"
+        output_gain_db: float = 0.0
         sample_rate: int | None = None
         auto_hang_up: bool = True
         hang_up_timeout_secs: float = 30.0
@@ -161,6 +169,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             quality=self._params.output_resampler_quality,
             clear_after_secs=self._params.resampler_clear_after_secs,
         )
+        self._output_gain = 10 ** (self._params.output_gain_db / 20)
 
         self._sent_messages = (
             0  # streamAudio messages sent; mod_audio_stream numbers files the same way
@@ -215,6 +224,8 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             audio = await self._output_resampler.resample(
                 frame.audio, frame.sample_rate, self._out_sample_rate
             )
+            if audio and self._output_gain != 1.0:
+                audio = scale_audio(audio, self._output_gain)
             if not self._control.started:
                 # Nobody would play it yet: keep it and send it with the next block.
                 self._held_audio.extend(audio)

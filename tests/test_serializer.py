@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import array
 import asyncio
 import base64
 import json
@@ -213,6 +214,43 @@ async def test_audio_held_without_uuid_is_capped(esl_server):
     message = json.loads(await serializer.serialize(audio_frame(20)))
     # Only the last 5 s are kept (8 kHz L16), plus the new frame.
     assert len(base64.b64decode(message["data"]["audioData"])) == 5 * 16000 + 320
+    await serializer.serialize(CancelFrame())
+
+
+def tone_frame(amplitude: int, ms: int = 20, rate: int = 8000) -> OutputAudioRawFrame:
+    samples = array.array(
+        "h", [amplitude if i % 2 else -amplitude for i in range(rate * ms // 1000)]
+    )
+    return OutputAudioRawFrame(audio=samples.tobytes(), sample_rate=rate, num_channels=1)
+
+
+def sent_samples(message: str) -> array.array:
+    return array.array("h", base64.b64decode(json.loads(message)["data"]["audioData"]))
+
+
+@pytest.mark.parametrize(
+    "gain_db,amplitude,expected",
+    [
+        pytest.param(0.0, 20000, 20000, id="default-unchanged"),
+        pytest.param(-6.0, 20000, 10023, id="attenuated"),
+        pytest.param(12.0, 20000, 32767, id="clipped-to-16-bits"),
+    ],
+)
+async def test_output_gain(esl_server, gain_db, amplitude, expected):
+    serializer = make_serializer(esl_server, output_gain_db=gain_db)
+    await serializer.setup(SETUP)
+    samples = sent_samples(await serializer.serialize(tone_frame(amplitude)))
+    assert max(samples) == expected
+    await serializer.serialize(CancelFrame())
+
+
+async def test_output_gain_applies_to_held_audio(esl_server):
+    serializer = make_serializer(esl_server, call_uuid=None, output_gain_db=-6.0)
+    await serializer.setup(SETUP)
+    assert await serializer.serialize(tone_frame(20000)) is None  # held: no UUID yet
+    await serializer.deserialize(UUID)
+    samples = sent_samples(await serializer.serialize(tone_frame(20000)))
+    assert max(samples) == 10023 and len(samples) == 2 * 160
     await serializer.serialize(CancelFrame())
 
 
