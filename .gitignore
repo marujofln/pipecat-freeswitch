@@ -9,3 +9,4 @@ build/
 .env
 docs/review-2026-10-28.md
 .coverage
+CLAUDE.md

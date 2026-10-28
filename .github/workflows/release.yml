@@ -9,6 +9,10 @@ on:
   push:
     tags: ["v*"]
 
+# Read-only by default; only the publish job gets an OIDC token for trusted publishing.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest

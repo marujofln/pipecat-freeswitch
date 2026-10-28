@@ -7,10 +7,13 @@ Community integration that connects [Pipecat](https://github.com/pipecat-ai/pipe
 `FreeSWITCHFrameSerializer` plugs into Pipecat's `FastAPIWebsocketTransport`: caller audio flows into the pipeline,
 bot audio is played on the call, and barge-in and hang-up work.
 
+This is an independent community project, not affiliated with SignalWire (FreeSWITCH), Daily (Pipecat) or the
+mod_audio_stream authors.
+
 > **Status: v0.1.0, alpha.** Tested end to end against FreeSWITCH 1.11.3 with a Pipecat pipeline (tone playback,
-> hang-up after speech, interruption), with unit and integration tests, and with a softphone call to the full
-> STT → LLM → TTS example (all three on OpenRouter), barge-in included. Deepgram, OpenAI, Cartesia and ElevenLabs
-> direct have not been run against their live APIs yet. Not yet published on PyPI.
+> hang-up after speech, interruption), with unit and integration tests, and with calls from a softphone (Linphone)
+> and a desk phone (Grandstream) to the full STT → LLM → TTS example (all three on OpenRouter), barge-in included.
+> Deepgram, OpenAI, Cartesia and ElevenLabs direct have not been run against their live APIs yet.
 
 ## How it works
 
@@ -38,9 +41,9 @@ Caller ──SIP/RTP──> FreeSWITCH ──(mod_audio_stream, WebSocket)──
 ## Installation
 
 ```bash
-pip install "pipecat-freeswitch @ git+https://github.com/marujofln/pipecat-freeswitch"
-# or, with uv
-uv add "pipecat-freeswitch @ git+https://github.com/marujofln/pipecat-freeswitch"
+uv add pipecat-freeswitch
+# or
+pip install pipecat-freeswitch
 ```
 
 The ESL client is built on asyncio streams; the only dependency is `pipecat-ai`. Install the Pipecat extras your
@@ -343,8 +346,14 @@ run a real Pipecat pipeline behind `FastAPIWebsocketTransport` on uvicorn, with 
 mod_audio_stream against the same fake event socket.
 
 [`examples/freeswitch/`](examples/freeswitch/) is a test bench: FreeSWITCH 1.11.3 built from source with
-mod_audio_stream, a bench-only SIP profile so FreeSWITCH can call itself, and experiment scripts. End-to-end test of
-the serializer with a real Pipecat pipeline:
+mod_audio_stream, a bench-only SIP profile so FreeSWITCH can call itself, and experiment scripts.
+
+> **The bench is for local testing only.** It uses fixed, public credentials: SIP user `1000` / `1234`, event socket
+> password `ClueCon`, WebSocket token `bench-token`. FreeSWITCH runs with host networking and its softphone profile
+> listens on the machine's LAN address (port 5060). Run it on a trusted network, never on a host reachable from the
+> internet, and do not reuse its configuration in production.
+
+End-to-end test of the serializer with a real Pipecat pipeline:
 
 ```bash
 cd examples/freeswitch && docker compose up -d && cd ../..

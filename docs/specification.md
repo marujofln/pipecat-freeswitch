@@ -216,8 +216,8 @@ the call was still up, the call parked. Two safeguards:
 
 Points of attention:
 - **Block size:** with `sendmsg` there is no fixed cost per file, so blocks can be small (40 ms tested end to end
-  with no gap). What remains is the latency × overhead trade-off (base64, one file and one event per block), which
-  is an open experimental question. The block size is the transport's `audio_out_10ms_chunks`.
+  with no gap). What remains is the latency × overhead trade-off (base64, one file and one event per block), and,
+  as measured on 2026-10-28, how much caller audio each block's playback flushes (see above). The block size is the transport's `audio_out_10ms_chunks`.
 - **File order:** `play` events arrive in `streamAudio` order, and `sendmsg` keeps the channel queue in order.
   `uuid_break all` clears the queue, but `play` events in flight can arrive after the break. Fix: the module names
   files `<uuid>_<n>` with `n` increasing per `streamAudio` (`audio_streamer_glue.cpp:430`); the serializer counts
@@ -273,7 +273,7 @@ Points of attention:
 - **Bot audio level (2026-10-28):** TTS speech arrived around −13 dBFS RMS with full-scale peaks, about 12 dB above
   telephone level, and distorted on both phones; `output_gain_db` (−12 dB in the example) fixes it.
 - **ptime:** measurements used 20 ms. With another ptime the `uuid_broadcast` gap would change (5 × ptime); with
-  `sendmsg` it should not matter, but check it in the harness with different codecs.
+  `sendmsg` it should not matter, but check it on the bench with different codecs.
 
 ## Test dialplan (validated on the bench)
 
@@ -303,7 +303,8 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
   `cleanup()`, error-path and in-process integration tests, explicit sdist contents). Still to do for listing: PyPI
   release, 30–60 s video with an interruption, PR to the Pipecat docs.
 - **v0.2:** DTMF (ESL or a dialplan bind), adapters for `mod_audio_fork` and `mod_earshot`'s native protocol.
-- **v0.3:** latency metrics (time to first audio per block size).
+- **v0.3:** a growing-block chunker (small first block, then ~1 s blocks) and latency metrics (time to first audio
+  per block size).
 
 ## Listing checklist (community integrations guide)
 

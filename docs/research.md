@@ -1,8 +1,8 @@
-# Research — 2026-10-27 session
+# Research — Pipecat, FreeSWITCH and mod_audio_stream
 
-Notes from the chat session that started the project. Star counts and versions are as of the time of research.
+Background research done on 2026-10-27, when the project started. Star counts and versions are as of that date.
 
-## 2. Pipecat
+## 1. Pipecat
 
 - Repo: https://github.com/pipecat-ai/pipecat — BSD-2, ~16.8k stars, maintained by Daily.
 - v1.0.0 on 2026-04-14; v1.3.0 (2026-05-29) added a multi-agent framework.
@@ -13,7 +13,7 @@ Notes from the chat session that started the project. Star counts and versions a
 - Known criticism: deploying at scale is left to the user; commercial gravity pulls toward Daily WebRTC /
   Pipecat Cloud.
 
-## 3. FreeSWITCH ↔ Pipecat landscape
+## 2. FreeSWITCH ↔ Pipecat landscape
 
 - Service catalog: https://docs.pipecat.ai/api-reference/server/services/supported-services
   Serializers: Acefone, Asterisk (community), AwaazAI, Bandwidth, didlogic, Exotel, Genesys, Plivo, Telnyx,
@@ -31,7 +31,7 @@ Notes from the chat session that started the project. Star counts and versions a
 - `mod_audio_stream` forks: amigniter (original), rasonyang, saravanansaru, connexcs. The commercial edition with
   bidirectional binary streaming is free up to 10 channels, with no source code.
 
-## 4. mod_audio_stream protocol (open source)
+## 3. mod_audio_stream protocol (open source)
 
 - `uuid_audio_stream <uuid> start <ws-url> <mono|mixed|stereo> <8k|16k> [metadata]` — sends L16; the metadata is
   sent before the audio.
@@ -44,7 +44,7 @@ Notes from the chat session that started the project. Star counts and versions a
   module does not play the file itself; see `docs/specification.md`.)
 - Source: https://github.com/connexcs/mod_audio_stream (README identical to amigniter's).
 
-## 5. Requirements for listing as a community integration
+## 4. Requirements for listing as a community integration
 
 Source: https://github.com/pipecat-ai/pipecat/blob/main/COMMUNITY_INTEGRATIONS.md
 - Repo with code, a foundational single-file example, README (intro, installation, pipeline usage, how to run the
