@@ -9,13 +9,19 @@
 FreeSWITCH dialplan (the last argument is the channel UUID, sent as the first message)::
 
     <action application="answer"/>
+    <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
     <action application="set"
       data="r=${uuid_audio_stream(${uuid} start ws://BOT_HOST:8765/ws mono 8k ${uuid})}"/>
     <action application="park"/>
 
+The WebSocket only accepts connections that carry BOT_TOKEN as a bearer token: otherwise anyone who
+can reach it could send another call's UUID and interrupt or hang up that call. ``bot_token`` is
+set in vars.xml (``<X-PRE-PROCESS cmd="set" data="bot_token=..."/>``). Use ``wss://`` or a private
+network, since over plain ``ws://`` the token travels in clear text.
+
 The bot also needs the FreeSWITCH event socket (mod_event_socket) to play audio, barge in and
-hang up. Environment: DEEPGRAM_API_KEY, OPENAI_API_KEY, and optionally FREESWITCH_ESL_HOST,
-FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD.
+hang up. Environment: BOT_TOKEN, DEEPGRAM_API_KEY, OPENAI_API_KEY, and optionally
+FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD.
 
 The text-to-speech service is chosen with TTS_PROVIDER:
 
@@ -33,6 +39,7 @@ FreeSWITCH without resampling.
 """
 
 import os
+import secrets
 
 import uvicorn
 from dotenv import load_dotenv
@@ -65,7 +72,18 @@ STREAM_RATE = 8000
 # 8000 for PCMU/PCMA. For Opus use STREAM_RATE = 16000 ("16k") and OUTPUT_RATE = 48000.
 OUTPUT_RATE = 8000
 
+# Shared secret that FreeSWITCH sends in the Authorization header (STREAM_EXTRA_HEADERS).
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Set BOT_TOKEN to the token FreeSWITCH sends (bot_token in vars.xml)")
+
 app = FastAPI()
+
+
+def is_authorized(websocket: WebSocket) -> bool:
+    """Whether the handshake carries the bot token, compared in constant time."""
+    auth = websocket.headers.get("authorization", "")
+    return secrets.compare_digest(auth.encode(), f"Bearer {BOT_TOKEN}".encode())
 
 
 def build_tts():
@@ -99,6 +117,10 @@ def build_tts():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """Handle one call."""
+    if not is_authorized(websocket):
+        logger.warning(f"Rejected WebSocket from {websocket.client}: missing or wrong token")
+        await websocket.close(code=1008)  # before accept(): the handshake fails with HTTP 403
+        return
     await websocket.accept()
     # mod_audio_stream sends the metadata (here, the channel UUID) before any audio.
     call_uuid = (await websocket.receive_text()).strip()

@@ -7,6 +7,9 @@ serializer), and checks what the caller hears:
   hang-up to come only after it.
 - ``interrupt``: the bot is interrupted while the tone plays. Expect the audio to stop at once and not
   resume.
+- ``auth``: WebSocket handshakes to the bot without the bearer token, or with a wrong one. Expect both
+  to be refused (HTTP 403). The calls of the other scenarios carry the right token, set in the
+  dialplan with ``STREAM_EXTRA_HEADERS``, so they show it is accepted.
 
 ``speak_end`` also measures first-audio latency, FreeSWITCH CPU time for the call, and how clean the tone
 sounds: in every 10 ms window of the caller's recording a 440 Hz sine is fitted and the residual reported in dB
@@ -22,6 +25,7 @@ Requires the bench (``docker compose up -d`` in ``examples/freeswitch``) and the
 import argparse
 import array
 import asyncio
+import base64
 import json
 import math
 import statistics
@@ -145,6 +149,38 @@ async def run_speak_end(bench: Bench, tone_seconds: float, chunks: int, rates: d
     }
 
 
+async def handshake_status(path: str, headers: dict[str, str]) -> int:
+    """Open a WebSocket handshake to the bot and return the HTTP status of the reply."""
+    host, port = BOT_URL.removeprefix("http://").split(":")
+    reader, writer = await asyncio.open_connection(host, int(port))
+    request = [
+        f"GET {path} HTTP/1.1",
+        f"Host: {host}:{port}",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Key: {base64.b64encode(b'pipecat-freeswit').decode()}",
+        "Sec-WebSocket-Version: 13",
+        *(f"{key}: {value}" for key, value in headers.items()),
+    ]
+    writer.write(("\r\n".join(request) + "\r\n\r\n").encode())
+    await writer.drain()
+    status = await asyncio.wait_for(reader.readline(), 5)
+    writer.close()
+    return int(status.split()[1])
+
+
+async def run_auth() -> dict:
+    """Handshakes without the token and with a wrong one must be refused."""
+    no_token = await handshake_status("/ws", {})
+    wrong_token = await handshake_status("/ws", {"Authorization": "Bearer wrong-token"})
+    return {
+        "scenario": "auth",
+        "no_token_status": no_token,
+        "wrong_token_status": wrong_token,
+        "refused": no_token == 403 and wrong_token == 403,
+    }
+
+
 async def run_interrupt(
     bench: Bench, tone_seconds: float, after_s: float, chunks: int, rates: dict
 ) -> dict:
@@ -192,7 +228,7 @@ async def main():
     parser.add_argument("--in-rate", type=int, default=8000, choices=sorted(EXTENSIONS))
     parser.add_argument("--out-rates", default="8000", help="freeswitch_out_sample_rate values to compare")
     parser.add_argument("--pipeline-out-rate", type=int, default=24000, help="pipeline (TTS) output rate")
-    parser.add_argument("--scenarios", default="speak_end,interrupt")
+    parser.add_argument("--scenarios", default="auth,speak_end,interrupt")
     args = parser.parse_args()
 
     conn = await EslConnection.connect("127.0.0.1", 8021, "ClueCon")
@@ -209,6 +245,10 @@ async def main():
     results = []
     try:
         scenarios = args.scenarios.split(",")
+        if "auth" in scenarios:
+            result = await run_auth()
+            results.append(result)
+            print(json.dumps(result), flush=True)
         for out_rate in (int(r) for r in args.out_rates.split(",")):
             rates = {
                 "in_rate": args.in_rate,

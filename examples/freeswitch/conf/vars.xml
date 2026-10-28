@@ -5,4 +5,6 @@
   <X-PRE-PROCESS cmd="set" data="outbound_codec_prefs=PCMU,PCMA"/>
   <X-PRE-PROCESS cmd="set" data="internal_sip_port=5060"/>
   <X-PRE-PROCESS cmd="set" data="default_areacode=11"/>
+  <!-- Bearer token sent to the Pipecat bot (bench/tone_bot.py BOT_TOKEN). Use a long random value outside the bench. -->
+  <X-PRE-PROCESS cmd="set" data="bot_token=bench-token"/>
 </include>

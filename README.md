@@ -52,12 +52,13 @@ pipeline needs (`websocket` for the transport, plus your STT/LLM/TTS services).
 2. **mod_event_socket**, reachable from the bot. The event socket grants full control of FreeSWITCH: keep it on a
    private network, restrict it with an ACL (`apply-inbound-acl`) and set a strong password.
 3. **SIP profiles with an RTP timer** (`<param name="rtp-timer-name" value="soft"/>`, as in the vanilla config).
-4. **Dialplan**: answer, start the stream with the channel UUID as metadata, and park:
+4. **Dialplan**: answer, set the bot's token, start the stream with the channel UUID as metadata, and park:
 
 ```xml
 <extension name="pipecat">
   <condition field="destination_number" expression="^9999$">
     <action application="answer"/>
+    <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
     <action application="set"
       data="stream_result=${uuid_audio_stream(${uuid} start ws://BOT_HOST:8765/ws mono 8k ${uuid})}"/>
     <action application="park"/>
@@ -65,17 +66,46 @@ pipeline needs (`websocket` for the transport, plus your STT/LLM/TTS services).
 </extension>
 ```
 
+with the token in `vars.xml` (a long random value, e.g. from `openssl rand -hex 32`):
+
+```xml
+<X-PRE-PROCESS cmd="set" data="bot_token=..."/>
+```
+
+### Securing the WebSocket
+
+The serializer controls the call named by the first WebSocket message. Without authentication, anyone who can reach
+the bot's WebSocket could send another call's UUID and interrupt or hang up that call. (The serializer accepts only
+canonical UUIDs, so the message cannot inject event socket commands.)
+
+- **Require a token.** mod_audio_stream sends the headers in the `STREAM_EXTRA_HEADERS` channel variable (a JSON
+  object) with the handshake. Check the `Authorization` header **before** `websocket.accept()`, with
+  `secrets.compare_digest`, and close with code 1008 otherwise; the handshake then fails with HTTP 403. A header
+  is preferable to a `?token=` query string, which ends up in FreeSWITCH and proxy logs.
+- **Encrypt the link.** Over plain `ws://` the token travels in clear text: use `wss://` (mod_audio_stream's
+  `STREAM_TLS_*` variables) or keep FreeSWITCH and the bot on a private network.
+- A single shared token lets whoever holds it name any call. A per-call token (an HMAC of the channel UUID, checked
+  against the first message) would limit a leak to one call; it is not implemented yet.
+
 ## Usage
 
 ```python
+import secrets
+
 from fastapi import WebSocket
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 
 from pipecat_freeswitch import FreeSWITCHFrameSerializer
 
+BOT_TOKEN = "..."  # the bot_token of vars.xml, e.g. from an environment variable
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    auth = websocket.headers.get("authorization", "")
+    if not secrets.compare_digest(auth.encode(), f"Bearer {BOT_TOKEN}".encode()):
+        await websocket.close(code=1008)  # refuse the handshake (HTTP 403)
+        return
     await websocket.accept()
     call_uuid = (await websocket.receive_text()).strip()  # first message: the channel UUID
 
@@ -163,6 +193,7 @@ of your choice, **Cartesia** (default) or **ElevenLabs** (two different companie
 | `elevenlabs` | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (required: no default voice) | `elevenlabs` |
 
 ```bash
+export BOT_TOKEN=...  # same value as bot_token in FreeSWITCH's vars.xml
 export DEEPGRAM_API_KEY=... OPENAI_API_KEY=... CARTESIA_API_KEY=...
 export FREESWITCH_ESL_HOST=10.0.0.5 FREESWITCH_ESL_PASSWORD=ClueCon
 uv run --with "pipecat-ai[websocket,deepgram,openai,cartesia,silero]" --with python-dotenv --with uvicorn \
@@ -179,7 +210,8 @@ Install only the extra of the provider you use. Both services synthesize at the 
 service in Pipecat supports PCM output at 8, 16, 24, 32 and 48 kHz (`pcm_8000` ... `pcm_48000`); this has been
 checked in Pipecat's code, but neither provider has been run against its live API here.
 
-Point the dialplan's `uuid_audio_stream` at `ws://BOT_HOST:8765/ws mono 8k ${uuid}`.
+Point the dialplan's `uuid_audio_stream` at `ws://BOT_HOST:8765/ws mono 8k ${uuid}`, with `STREAM_EXTRA_HEADERS`
+set as in [FreeSWITCH setup](#freeswitch-setup). The bot refuses to start without `BOT_TOKEN`.
 
 ## Development
 
@@ -197,7 +229,7 @@ the serializer with a real Pipecat pipeline:
 cd examples/freeswitch && docker compose up -d && cd ../..
 uv pip install "pipecat-ai[websocket]" fastapi "uvicorn[standard]"
 .venv/bin/python bench/tone_bot.py &   # Pipecat bot on extension 9998
-python3 bench/run_e2e.py               # tone + hang-up after speech, and interruption
+python3 bench/run_e2e.py               # token check, tone + hang-up after speech, and interruption
 ```
 
 The bench README documents the phase 0 measurements that shaped the design: why playback uses `sendmsg`, why

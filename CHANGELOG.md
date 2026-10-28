@@ -26,6 +26,10 @@ All notable changes to this project are documented here. The format follows
   Previously, any client that could reach the bot's WebSocket could send a first message with a newline in the
   "UUID" and run arbitrary ESL commands on FreeSWITCH (e.g. `api system ...`). A malformed `call_uuid` now raises
   `ValueError`; a malformed first message is logged and ignored.
+- `examples/bot.py` and the bench bot require a bearer token on the WebSocket handshake, sent by FreeSWITCH through
+  `STREAM_EXTRA_HEADERS` (`bot_token` in vars.xml), so a client that can reach the WebSocket cannot name another
+  call's UUID and interrupt or hang it up. The example bot needs `BOT_TOKEN`. The README documents the setup and
+  the need for `wss://` or a private network. `bench/run_e2e.py` gains an `auth` scenario.
 
 ### Fixed
 

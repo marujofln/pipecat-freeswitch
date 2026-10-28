@@ -8,6 +8,9 @@ counts the caller audio it receives and plays a tone, then, depending on the sce
 - ``interrupt``: push an interruption ``interrupt_after_s`` after the tone starts (playback must stop
   at once and stay stopped), then end the call.
 
+Connections without ``Authorization: Bearer $BOT_TOKEN`` (default ``bench-token``, the ``bot_token`` of the
+bench's vars.xml) are refused during the handshake.
+
 Events go to ``$CAPTURE_DIR/<uuid>-bot.jsonl``. Run from the repository's venv:
 ``.venv/bin/python bench/tone_bot.py``; ``bench/run_e2e.py`` drives the calls.
 """
@@ -17,6 +20,7 @@ import asyncio
 import json
 import math
 import os
+import secrets
 import time
 
 import uvicorn
@@ -38,6 +42,7 @@ from pydantic import BaseModel
 from pipecat_freeswitch import FreeSWITCHFrameSerializer
 
 PORT = int(os.environ.get("BOT_PORT", "8766"))
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "bench-token")
 CAPTURE_DIR = os.environ.get(
     "CAPTURE_DIR", os.path.join(os.path.dirname(__file__), "..", "examples/freeswitch/captures")
 )
@@ -109,6 +114,10 @@ async def set_config(new_config: BotConfig) -> BotConfig:
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     """Run one call: the first message from mod_audio_stream is the channel UUID."""
+    auth = websocket.headers.get("authorization", "")
+    if not secrets.compare_digest(auth.encode(), f"Bearer {BOT_TOKEN}".encode()):
+        await websocket.close(code=1008)  # before accept(): the handshake fails with HTTP 403
+        return
     await websocket.accept()
     uuid = (await websocket.receive_text()).strip()
     scenario = config
