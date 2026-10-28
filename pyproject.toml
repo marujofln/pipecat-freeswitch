@@ -33,7 +33,12 @@ Repository = "https://github.com/marujofln/pipecat-freeswitch"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
     "ruff>=0.6",
+    # tests/test_integration.py: the real transport, served by uvicorn, with a websockets client.
+    "pipecat-ai[websocket]>=1.14.0",
+    "uvicorn>=0.30",
+    "websockets>=13",
 ]
 bench = [
     "pipecat-ai[websocket]>=1.14.0",
@@ -48,6 +53,18 @@ packages = ["src/pipecat_freeswitch"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["tests"]
+addopts = "--strict-markers"
+markers = [
+    "integration: real Pipecat pipeline and transport in process (deselect with '-m \"not integration\"')",
+]
+
+[tool.coverage.run]
+source = ["pipecat_freeswitch"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
 
 [tool.ruff]
 line-length = 100

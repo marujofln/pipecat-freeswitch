@@ -17,12 +17,25 @@ class FakeESLServer:
     It authenticates any client using ``password``, answers every command with
     ``+OK``, records the commands it received and can emit events to all
     connected clients.
+
+    Failures are set up through attributes: ``greeting`` replaces the
+    ``auth/request`` greeting, ``errors`` maps a command prefix to the error
+    text to reply with, and a command starting with ``drop_on`` closes the
+    connection instead of being answered. With ``auto_complete_playback``,
+    every ``sendmsg`` is followed by the ``CHANNEL_EXECUTE_COMPLETE`` of its
+    playback, as if the file had played at once.
     """
 
     def __init__(self, password: str = "ClueCon"):
         self.password = password
         self.commands: list[str] = []
         self.port = 0
+        self.greeting = "auth/request"
+        self.errors: dict[str, str] = {}
+        self.drop_on: str | None = None
+        self.auto_complete_playback = False
+        # Client connections currently open, to catch leaked connections.
+        self.open_connections = 0
         self._server: asyncio.base_events.Server | None = None
         self._writers: list[asyncio.StreamWriter] = []
         self._command_seen = asyncio.Event()
@@ -95,9 +108,20 @@ class FakeESLServer:
         """Emit CHANNEL_HANGUP_COMPLETE."""
         await self.emit({"Event-Name": "CHANNEL_HANGUP_COMPLETE", "Unique-ID": uuid})
 
+    async def disconnect(self, notice: bool = False):
+        """Close every client connection, optionally after a disconnect notice."""
+        for writer in self._writers:
+            if notice:
+                body = "Disconnected, goodbye.\n"
+                header = f"Content-Type: text/disconnect-notice\nContent-Length: {len(body)}\n\n"
+                writer.write((header + body).encode())
+                await writer.drain()
+            writer.close()
+
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self._writers.append(writer)
-        writer.write(b"Content-Type: auth/request\n\n")
+        self.open_connections += 1
+        writer.write(f"Content-Type: {self.greeting}\n\n".encode())
         await writer.drain()
         try:
             while True:
@@ -114,17 +138,41 @@ class FakeESLServer:
                     continue
                 self.commands.append(command)
                 self._command_seen.set()
+                if self.drop_on and command.startswith(self.drop_on):
+                    break
+                error = next((e for p, e in self.errors.items() if command.startswith(p)), None)
+                reply = error or "+OK"
                 if command.startswith("api "):
-                    body = "+OK\n"
+                    body = f"{reply}\n"
                     header = f"Content-Type: api/response\nContent-Length: {len(body)}\n\n"
                     writer.write((header + body).encode())
                 else:
-                    writer.write(b"Content-Type: command/reply\nReply-Text: +OK\n\n")
+                    writer.write(f"Content-Type: command/reply\nReply-Text: {reply}\n\n".encode())
                 await writer.drain()
+                if self.auto_complete_playback and command.startswith("sendmsg") and not error:
+                    headers = dict(line.split(": ", 1) for line in command.splitlines()[1:])
+                    await self.emit(
+                        {
+                            "Event-Name": "CHANNEL_EXECUTE_COMPLETE",
+                            "Unique-ID": command.split()[1],
+                            "Application": "playback",
+                            "Application-Data": headers["execute-app-arg"],
+                        }
+                    )
         except ConnectionError:
             pass
         finally:
+            self.open_connections -= 1
             writer.close()
+
+    async def wait_until_all_closed(self, timeout: float = 2.0):
+        """Wait until every client has closed its connection."""
+
+        async def wait():
+            while self.open_connections:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait(), timeout)
 
     @staticmethod
     async def _read_command(reader: asyncio.StreamReader) -> str | None:

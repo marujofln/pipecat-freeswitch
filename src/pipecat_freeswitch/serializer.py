@@ -273,6 +273,19 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             logger.debug(f"{self}: ignoring text message: {data[:200]!r}")
         return None
 
+    async def cleanup(self):
+        """Hang up if still needed and close the event socket connection.
+
+        Call this from the transport's ``on_client_disconnected`` handler. Once
+        the WebSocket is closed, the transport no longer passes frames to the
+        serializer, so the ``CancelFrame`` that ends the pipeline never reaches
+        it: without this call, a WebSocket that drops while the call is up
+        would leave the call parked and the event socket connection open.
+        Safe to call more than once, and after ``EndFrame`` or ``CancelFrame``.
+        """
+        await super().cleanup()
+        await self._end_call(CancelFrame())
+
     async def _end_call(self, frame: EndFrame | CancelFrame):
         if self._params.auto_hang_up and not self._hangup_attempted:
             self._hangup_attempted = True

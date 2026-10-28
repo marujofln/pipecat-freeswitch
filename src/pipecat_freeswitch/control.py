@@ -211,6 +211,10 @@ class FreeSWITCHControl:
                     async with self._changed:
                         self._channel_gone = True
                         self._changed.notify_all()
+                    # Nothing else can happen on this channel: do not hold the connection
+                    # open in case the application never calls stop().
+                    await conn.close()
+                    return
         except ESLError:
             if not self._channel_gone:
                 logger.error(f"{self}: lost the event socket connection; audio will not play")

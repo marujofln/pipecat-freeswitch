@@ -110,6 +110,24 @@ async def test_first_message_cannot_inject_esl_commands(esl_server, message):
     await serializer.serialize(CancelFrame())
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param("{not json", id="invalid-json"),
+        pytest.param('{"lang": "pt-BR"}', id="json-without-uuid"),
+        pytest.param('{"uuid": 42}', id="json-uuid-not-a-string"),
+        pytest.param("   ", id="blank"),
+    ],
+)
+async def test_first_message_without_uuid_is_ignored(esl_server, message):
+    serializer = make_serializer(esl_server, call_uuid=None)
+    await serializer.setup(SETUP)
+    assert await serializer.deserialize(message) is None
+    assert serializer.call_uuid is None
+    assert esl_server.commands == []
+    await serializer.serialize(CancelFrame())
+
+
 async def test_valid_uuid_still_accepted_after_rejected_message(esl_server):
     serializer = make_serializer(esl_server, call_uuid=None)
     await serializer.setup(SETUP)
@@ -386,6 +404,31 @@ async def test_cancel_frame_hangs_up_immediately(esl_server):
     await esl_server.wait_for_command("sendmsg")
     await asyncio.wait_for(serializer.serialize(CancelFrame()), 1)
     assert f"api uuid_kill {UUID}" in esl_server.commands
+
+
+async def test_cleanup_hangs_up_and_closes_the_event_socket(esl_server):
+    # The transport skips the serializer once the WebSocket is closed, so cleanup() ends the call.
+    serializer = make_serializer(esl_server)
+    await serializer.setup(SETUP)
+    await serializer.cleanup()
+    assert f"api uuid_kill {UUID}" in esl_server.commands
+    await esl_server.wait_until_all_closed()
+
+
+async def test_cleanup_after_end_frame_does_nothing_more(esl_server):
+    serializer = make_serializer(esl_server, hang_up_timeout_secs=0.1)
+    await serializer.setup(SETUP)
+    await serializer.serialize(EndFrame())
+    await serializer.cleanup()
+    assert esl_server.commands.count(f"api uuid_kill {UUID}") == 1
+
+
+async def test_cleanup_without_auto_hang_up_only_closes(esl_server):
+    serializer = make_serializer(esl_server, auto_hang_up=False)
+    await serializer.setup(SETUP)
+    await serializer.cleanup()
+    assert not any(c.startswith("api uuid_kill") for c in esl_server.commands)
+    await esl_server.wait_until_all_closed()
 
 
 async def test_no_hang_up_when_disabled(esl_server):

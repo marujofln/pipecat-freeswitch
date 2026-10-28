@@ -87,6 +87,7 @@ canonical UUIDs, so the message cannot inject event socket commands.)
 - A single shared token lets whoever holds it name any call. A per-call token (an HMAC of the channel UUID, checked
   against the first message) would limit a leak to one call; it is not implemented yet.
 
+
 ## Usage
 
 ```python
@@ -128,7 +129,16 @@ async def websocket_endpoint(websocket: WebSocket):
     )
     # Build the pipeline with transport.input() ... transport.output() and run it, with
     # PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000).
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        await worker.cancel()
+        await serializer.cleanup()  # hang up and close the event socket
 ```
+
+Call `serializer.cleanup()` when the WebSocket closes. Once it is closed, the transport stops passing frames to the
+serializer, so the `CancelFrame` that ends the pipeline never reaches it; without `cleanup()`, a WebSocket that drops
+while the call is up leaves the call parked and the event socket connection open until the call ends.
 
 `call_uuid` is optional: without it the serializer takes the UUID from the first message and holds bot audio until
 the event socket is ready. Reading it yourself, as above, lets the serializer connect during pipeline setup.
@@ -220,10 +230,15 @@ set as in [FreeSWITCH setup](#freeswitch-setup). The bot refuses to start withou
 ## Development
 
 ```bash
-uv venv && uv pip install -e . pytest pytest-asyncio ruff
-.venv/bin/python -m pytest          # unit tests (fake event socket, no FreeSWITCH needed)
-.venv/bin/ruff check src tests && .venv/bin/ruff format --check src tests
+uv sync --group dev
+uv run pytest --cov                    # all tests, with branch coverage (CI requires 95%)
+uv run pytest -m "not integration"     # unit tests only
+uv run ruff check src tests && uv run ruff format --check src tests
 ```
+
+No FreeSWITCH is needed. Unit tests use a fake event socket. The integration tests (`tests/test_integration.py`)
+run a real Pipecat pipeline behind `FastAPIWebsocketTransport` on uvicorn, with a WebSocket client playing
+mod_audio_stream against the same fake event socket.
 
 [`examples/freeswitch/`](examples/freeswitch/) is a test bench: FreeSWITCH 1.11.3 built from source with
 mod_audio_stream, a bench-only SIP profile so FreeSWITCH can call itself, and experiment scripts. End-to-end test of

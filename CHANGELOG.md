@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format follows
 - `output_resampler_quality` (default "QQ").
 - `examples/bot.py` can use ElevenLabs as well as Cartesia: set `TTS_PROVIDER=elevenlabs`, `ELEVENLABS_API_KEY`
   and `ELEVENLABS_VOICE_ID`. Cartesia stays the default; its voice can be set with `CARTESIA_VOICE_ID`.
+- Tests for the error paths of the event socket client and the control (failed commands, dropped connections,
+  malformed events), and in-process integration tests that run a real Pipecat pipeline behind
+  `FastAPIWebsocketTransport` with a client playing mod_audio_stream. CI enforces 95% branch coverage.
 
 ### Changed
 
@@ -34,6 +37,12 @@ All notable changes to this project are documented here. The format follows
   the need for `wss://` or a private network. `bench/run_e2e.py` gains an `auth` scenario.
 
 ### Fixed
+
+- A WebSocket that closed before the pipeline ended (caller hang-up, network drop) left the event socket connection
+  open and, if the call was still up, the call parked: the transport stops passing frames to the serializer once
+  the WebSocket is closed, so `CancelFrame` never reached it. New `FreeSWITCHFrameSerializer.cleanup()` hangs up
+  and closes the connection; call it from `on_client_disconnected` (the example and bench bots do). The control
+  also closes its connection on `CHANNEL_HANGUP_COMPLETE`, so it never outlives the call.
 
 - A `mod_audio_stream::play` file whose name did not match `<uuid>_<n>.tmp.<ext>` was played but never counted, so
   hang-up on `EndFrame` waited for `hang_up_timeout_secs`. Such files are now numbered in arrival order (with a

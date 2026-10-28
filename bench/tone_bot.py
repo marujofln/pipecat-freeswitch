@@ -168,6 +168,7 @@ async def ws_endpoint(websocket: WebSocket):
     async def on_client_disconnected(transport, client):
         log_event(uuid, "client_disconnected")
         await worker.cancel()
+        await serializer.cleanup()
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)

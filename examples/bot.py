@@ -201,6 +201,8 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
     async def on_client_disconnected(transport, client):
         logger.info(f"Call {call_uuid} disconnected")
         await worker.cancel()
+        # The closed WebSocket keeps CancelFrame from reaching the serializer: end the call here.
+        await serializer.cleanup()
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)

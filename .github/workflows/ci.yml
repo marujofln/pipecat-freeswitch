@@ -17,5 +17,5 @@ jobs:
         run: |
           uv run --group dev ruff check src tests
           uv run --group dev ruff format --check src tests
-      - name: Unit tests
-        run: uv run --group dev pytest
+      - name: Unit and integration tests, with coverage
+        run: uv run --group dev pytest --cov --cov-report=term-missing
