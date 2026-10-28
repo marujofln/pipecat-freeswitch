@@ -8,8 +8,9 @@ Community integration that connects [Pipecat](https://github.com/pipecat-ai/pipe
 bot audio is played on the call, and barge-in and hang-up work.
 
 > **Status: v0.1.0, alpha.** Tested end to end against FreeSWITCH 1.11.3 with a Pipecat pipeline (tone playback,
-> hang-up after speech, interruption) and with unit tests. The full STT → LLM → TTS example has been built but not
-> run against live AI services. Not yet published on PyPI.
+> hang-up after speech, interruption), with unit and integration tests, and with a softphone call to the full
+> STT → LLM → TTS example (all three on OpenRouter), barge-in included. Deepgram, OpenAI, Cartesia and ElevenLabs
+> direct have not been run against their live APIs yet. Not yet published on PyPI.
 
 ## How it works
 
@@ -234,22 +235,27 @@ each chosen with an environment variable:
 | Variable | Options (keys) | Pipecat extra |
 |---|---|---|
 | `STT_PROVIDER` | `deepgram` (default; `DEEPGRAM_API_KEY`), `openrouter`* (`OPENROUTER_API_KEY`; `STT_MODEL`, default `openai/whisper-1`) | `deepgram`, `openrouter` |
-| `LLM_PROVIDER` | `openai` (default; `OPENAI_API_KEY`), `openrouter` (`OPENROUTER_API_KEY`); `LLM_MODEL`, default `gpt-4.1-mini` / `openai/gpt-4.1-mini` | `openai`, `openrouter` |
-| `TTS_PROVIDER` | `cartesia` (default; `CARTESIA_API_KEY`, optional `CARTESIA_VOICE_ID`), `elevenlabs` (`ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, required: no default voice), `openrouter`* (`OPENROUTER_API_KEY`; `TTS_MODEL`, default `openai/gpt-4o-mini-tts`, `TTS_VOICE`, default `alloy`) | `cartesia`, `elevenlabs`, `openrouter` |
+| `LLM_PROVIDER` | `openai` (default; `OPENAI_API_KEY`), `openrouter` (`OPENROUTER_API_KEY`); `LLM_MODEL`, default `gpt-4.1-mini` / `openai/gpt-4.1-mini`; `LLM_MAX_TOKENS`, default 300 | `openai`, `openrouter` |
+| `TTS_PROVIDER` | `cartesia` (default; `CARTESIA_API_KEY`, optional `CARTESIA_VOICE_ID`), `elevenlabs` (`ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, required: no default voice), `openrouter`* (`OPENROUTER_API_KEY`; `TTS_MODEL`, default `elevenlabs/eleven-flash-v2.5`, `TTS_VOICE`, default `sarah`) | `cartesia`, `elevenlabs`, `openrouter` |
 
 With OpenRouter, one key covers all three, and the LLM can be any model OpenRouter routes to (e.g.
-`LLM_MODEL=anthropic/claude-...`).
+`LLM_MODEL=anthropic/claude-...`). `LLM_MAX_TOKENS` caps each answer: without a cap, OpenRouter reserves credit for
+the model's whole output limit (65,536 tokens for `openai/gpt-4.1-mini`) on every request and refuses it with HTTP 402
+when the balance is low.
 
-\* **OpenRouter's speech services are experimental here.** OpenRouter's `/audio/transcriptions` and `/audio/speech`
-work request by request, not as streams, and Pipecat has no OpenRouter STT or TTS service, so the bot uses Pipecat's
-OpenAI services pointed at OpenRouter.
-- **STT:** each utterance is transcribed only after the VAD detects that the caller stopped talking, which adds the
-  upload and transcription time to every turn (Deepgram transcribes while the caller speaks).
-- **TTS:** Pipecat's OpenAI service accepts only OpenAI voice names, so stick to OpenAI's models
-  (`openai/gpt-4o-mini-tts`); it assumes 24 kHz PCM, so the pipeline output runs at 24 kHz and the serializer
-  resamples to the channel rate.
-- The requests were checked against a local server that mimics OpenRouter's documented API (paths, auth, multipart
-  upload, JSON body, 24 kHz output), but not against the live API.
+\* **OpenRouter's speech services work request by request**, and Pipecat has no OpenRouter STT or TTS service:
+- **STT** uses Pipecat's OpenAI service pointed at OpenRouter's `/audio/transcriptions`. Each utterance is transcribed
+  only after the VAD detects that the caller stopped talking, which adds the upload and transcription time to every
+  turn (Deepgram transcribes while the caller speaks). Models: OpenRouter's models API with
+  `output_modalities=transcription` (e.g. `openai/whisper-1`, `openai/gpt-4o-mini-transcribe`, `deepgram/nova-3`).
+- **TTS** uses a small subclass of Pipecat's OpenAI service in `bot.py`. OpenRouter lists no OpenAI voice model, and
+  Pipecat's service only accepts OpenAI voice names, so the subclass accepts any OpenRouter voice model and reads the
+  PCM rate from the response's `Content-Type` (`audio/pcm;rate=24000;channels=1`). Models and their voices:
+  OpenRouter's models API with `output_modalities=speech` (the `supported_voices` field).
+- Measured on 2026-10-28, first audio for one sentence: `elevenlabs/eleven-flash-v2.5` about 0.85–1.1 s,
+  `deepgram/flux-tts` 0.8 s, `google/gemini-3.8-flash-tts` 2.4 s, all 24 kHz. Whisper transcribed a 2 s utterance
+  in 1.2 s. A phone call to the bench with all three on OpenRouter worked, barge-in included, with roughly 2–3 s
+  between the end of the caller's speech and the bot's answer. Cartesia and ElevenLabs direct start faster.
 
 ```bash
 export BOT_TOKEN=...  # same value as bot_token in FreeSWITCH's vars.xml

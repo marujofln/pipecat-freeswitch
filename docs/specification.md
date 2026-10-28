@@ -282,7 +282,8 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
 ## Listing checklist (community integrations guide)
 
 - [x] Code with Pipecat-style docstrings
-- [x] Foundational single-file example (`examples/bot.py`; built, not yet run against live AI services)
+- [x] Foundational single-file example (`examples/bot.py`; run on 2026-10-28 in a softphone call to the bench with
+  STT, LLM and TTS on OpenRouter, barge-in included; the Deepgram/OpenAI/Cartesia/ElevenLabs paths not yet)
 - [x] README: intro, installation, usage, how to run the example, tested Pipecat version
 - [x] BSD-2 LICENSE
 - [x] CHANGELOG

@@ -29,10 +29,12 @@ All notable changes to this project are documented here. The format follows
   STT → LLM → TTS pipeline with one `docker compose` command. `.env.example` lists the variables.
 - `examples/bot.py` checks the service keys at startup instead of failing in the first call, and reads `HOST`
   (default `0.0.0.0`) as well as `PORT`.
-- `examples/bot.py` can use OpenRouter: `LLM_PROVIDER=openrouter` (Pipecat's `OpenRouterLLMService`, any model via
-  `LLM_MODEL`), and, experimentally, `STT_PROVIDER=openrouter` and `TTS_PROVIDER=openrouter` (Pipecat's OpenAI
-  services pointed at OpenRouter's `/audio/transcriptions` and `/audio/speech`; not streamed, OpenAI voices only, not
-  yet run against the live API). One `OPENROUTER_API_KEY` covers all three. `STT_PROVIDER` and `LLM_PROVIDER` are
+- `examples/bot.py` can use OpenRouter for all three services, with one `OPENROUTER_API_KEY`: `LLM_PROVIDER=openrouter`
+  (Pipecat's `OpenRouterLLMService`, any model via `LLM_MODEL`), `STT_PROVIDER=openrouter` (Pipecat's OpenAI STT
+  pointed at `/audio/transcriptions`, default `openai/whisper-1`) and `TTS_PROVIDER=openrouter` (a subclass of
+  Pipecat's OpenAI TTS that accepts any OpenRouter voice model and reads the PCM rate from the response, default
+  `elevenlabs/eleven-flash-v2.5` with voice `sarah`). Both speech services work request by request. Tested with a
+  phone call to the bench, barge-in included. `STT_PROVIDER`, `LLM_PROVIDER` and `LLM_MAX_TOKENS` (default 300) are
   new; `LLM_MODEL` replaces the hard-coded model.
 
 ### Documentation

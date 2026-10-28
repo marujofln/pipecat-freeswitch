@@ -29,15 +29,17 @@ Services, each chosen with an environment variable (keys in parentheses):
   STT_MODEL, default ``openai/whisper-1``).
 - LLM_PROVIDER: ``openai`` (default; OPENAI_API_KEY) or ``openrouter`` (OPENROUTER_API_KEY).
   LLM_MODEL sets the model: ``gpt-4.1-mini`` and ``openai/gpt-4.1-mini`` by default.
+  LLM_MAX_TOKENS caps each answer (300 by default).
 - TTS_PROVIDER: ``cartesia`` (default; CARTESIA_API_KEY, optionally CARTESIA_VOICE_ID),
   ``elevenlabs`` (ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID, required: the service has no
   default voice) or ``openrouter`` (OPENROUTER_API_KEY; TTS_MODEL, default
-  ``openai/gpt-4o-mini-tts``, and TTS_VOICE, default ``alloy``).
+  ``elevenlabs/eleven-flash-v2.5``, and TTS_VOICE, default ``sarah``; the voices of each model
+  are in OpenRouter's models API, ``supported_voices``).
 
-OpenRouter's speech services are experimental here: they work request by request, not streamed.
-Speech-to-text transcribes each utterance only after the caller stops talking, which adds latency
-to every turn, and text-to-speech is assumed to return 24 kHz PCM, as OpenAI's does. They go
-through Pipecat's OpenAI services pointed at OpenRouter; this has not been run against the live API.
+OpenRouter's speech services are experimental here: they work request by request. Speech-to-text
+transcribes each utterance only after the caller stops talking, which adds latency to every turn.
+Text-to-speech answers each sentence in about 0.8 s (ElevenLabs Flash, Deepgram Flux) to 2.4 s
+(Gemini Flash), measured on 2026-10-28; Cartesia and ElevenLabs direct start faster.
 
 Run with the extras of the providers you use (``openrouter`` covers all three OpenRouter options)::
 
@@ -87,8 +89,12 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "cartesia").lower()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-# OpenAI's speech API returns 24 kHz PCM; OpenRouter's is assumed to do the same.
+# OpenRouter's voice models answered 24 kHz mono PCM when measured (ElevenLabs, Gemini, Deepgram);
+# each response's Content-Type says the actual rate, which the TTS service below follows.
 OPENROUTER_TTS_RATE = 24000
+# A spoken answer is a few sentences. Without a cap, OpenRouter reserves credit for the model's
+# whole output limit (65536 tokens) on every request and refuses it when the balance is low.
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "300"))
 # Rate the TTS synthesizes at (the pipeline output rate); the serializer sends OUTPUT_RATE.
 TTS_RATE = OPENROUTER_TTS_RATE if TTS_PROVIDER == "openrouter" else OUTPUT_RATE
 
@@ -156,30 +162,78 @@ def build_llm():
         return OpenRouterLLMService(
             api_key=os.getenv("OPENROUTER_API_KEY"),
             settings=OpenRouterLLMService.Settings(
-                model=os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
+                model=os.getenv("LLM_MODEL", "openai/gpt-4.1-mini"),
+                max_completion_tokens=LLM_MAX_TOKENS,
             ),
         )
     from pipecat.services.openai.llm import OpenAILLMService
 
     return OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(model=os.getenv("LLM_MODEL", "gpt-4.1-mini")),
+        settings=OpenAILLMService.Settings(
+            model=os.getenv("LLM_MODEL", "gpt-4.1-mini"), max_completion_tokens=LLM_MAX_TOKENS
+        ),
     )
+
+
+def pcm_rate(content_type: str, default: int) -> int:
+    """Sample rate from a Content-Type such as ``audio/pcm;rate=24000;channels=1``."""
+    for param in content_type.split(";")[1:]:
+        name, _, value = param.strip().partition("=")
+        if name == "rate" and value.isdigit():
+            return int(value)
+    return default
 
 
 def build_tts():
     """Create the text-to-speech service selected by TTS_PROVIDER."""
     provider = TTS_PROVIDER
     if provider == "openrouter":
+        from openai import APIError
+        from pipecat.frames.frames import ErrorFrame, TTSAudioRawFrame
         from pipecat.services.openai.tts import OpenAITTSService
 
-        return OpenAITTSService(
+        class OpenRouterTTSService(OpenAITTSService):
+            """Pipecat's OpenAI TTS service, adapted to OpenRouter's ``/audio/speech``.
+
+            OpenRouter's voice models are not OpenAI's (ElevenLabs, Gemini, Deepgram, ...) and
+            their voices have provider-specific names, so the OpenAI voice list is not enforced.
+            The PCM rate is read from the response's Content-Type
+            (``audio/pcm;rate=24000;channels=1``) instead of assumed.
+            """
+
+            async def run_tts(self, text: str, context_id: str):
+                params = {
+                    "input": text,
+                    "model": self._settings.model,
+                    "voice": self._settings.voice,
+                    "response_format": "pcm",
+                }
+                try:
+                    async with self._client.audio.speech.with_streaming_response.create(
+                        **params
+                    ) as r:
+                        rate = pcm_rate(r.headers.get("content-type", ""), self.sample_rate)
+                        await self.start_tts_usage_metrics(text)
+                        leftover = b""
+                        async for chunk in r.iter_bytes(self.chunk_size):
+                            # Keep whole 16-bit samples in every frame.
+                            chunk = leftover + chunk
+                            cut = len(chunk) - len(chunk) % 2
+                            chunk, leftover = chunk[:cut], chunk[cut:]
+                            if chunk:
+                                await self.stop_ttfb_metrics()
+                                yield TTSAudioRawFrame(chunk, rate, 1, context_id=context_id)
+                except APIError as e:
+                    yield ErrorFrame(error=f"OpenRouter TTS error: {e}")
+
+        return OpenRouterTTSService(
             api_key=os.getenv("OPENROUTER_API_KEY"),
             base_url=OPENROUTER_BASE_URL,
             sample_rate=OPENROUTER_TTS_RATE,
-            settings=OpenAITTSService.Settings(
-                model=os.getenv("TTS_MODEL", "openai/gpt-4o-mini-tts"),
-                voice=os.getenv("TTS_VOICE", "alloy"),
+            settings=OpenRouterTTSService.Settings(
+                model=os.getenv("TTS_MODEL", "elevenlabs/eleven-flash-v2.5"),
+                voice=os.getenv("TTS_VOICE", "sarah"),
             ),
         )
     if provider == "cartesia":
