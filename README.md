@@ -226,6 +226,14 @@ FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks agains
   of the calls in progress stay behind. A periodic cleanup handles them, with an age above your longest call so it
   never touches a live one, e.g. `find /tmp -maxdepth 1 -name '*-*-*-*-*_*.tmp.*' -mmin +240 -delete`. The package
   cannot delete them itself: the files belong to FreeSWITCH, on its host.
+- **Barge-in depends on the caller's audio reaching the bot while it speaks.** Once Pipecat detects the caller (VAD or
+  transcription), the bot's audio stops within a few milliseconds: 3–11 ms from detection to the end of playback in
+  FreeSWITCH, measured on the bench, with the audio still in flight dropped. But a softphone on loudspeaker with echo
+  cancellation or an echo limiter (Linphone's defaults, for example) attenuates the caller's microphone while the
+  bot's voice plays. In a stereo recording of such a call, the caller's channel was silent every time the bot spoke,
+  and the VAD only caught the caller when they spoke loudly and steadily. Use a headset, or turn the softphone's echo
+  cancellation and echo limiter off (with loudspeakers, the bot may then interrupt itself on its own echo). Lowering
+  the VAD thresholds (`min_volume`, `confidence` in `VADParams`) catches attenuated speech, at the same risk.
 
 ## Example
 

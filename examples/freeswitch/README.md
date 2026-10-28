@@ -31,7 +31,10 @@ docker compose logs -f bot  # "Call <uuid> connected" when you dial 9996
 ```
 
 The bot listens on `127.0.0.1:8767` and uses the bench's token (`bench-token`, `bot_token` in `conf/vars.xml`). It
-refuses to start if a key is missing. Interrupt it while it speaks to see barge-in.
+refuses to start if a key is missing. Interrupt it while it speaks to see barge-in. **Use a headset:** on
+loudspeaker, a softphone's echo cancellation or echo limiter (on by default in Linphone) attenuates your microphone
+while the bot speaks, and the bot may not hear you interrupt it (see "Known limitations" in the
+[main README](../../README.md#known-limitations)). Speak English: the bot's prompt and speech-to-text default to it.
 
 The providers are picked in `.env` (`STT_PROVIDER`, `LLM_PROVIDER`, `TTS_PROVIDER`; see `.env.example` and the
 [main README](../../README.md#example)). For example, `LLM_PROVIDER=openrouter` with `OPENROUTER_API_KEY` replaces
