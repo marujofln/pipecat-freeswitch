@@ -7,3 +7,4 @@ build/
 .pytest_cache/
 .ruff_cache/
 .env
+docs/review-2026-10-28.md
