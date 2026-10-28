@@ -40,6 +40,7 @@ from pipecat.workers.runner import WorkerRunner
 from pydantic import BaseModel
 
 from pipecat_freeswitch import FreeSWITCHFrameSerializer
+from pipecat_freeswitch.control import is_valid_uuid
 
 PORT = int(os.environ.get("BOT_PORT", "8766"))
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "bench-token")
@@ -120,6 +121,9 @@ async def ws_endpoint(websocket: WebSocket):
         return
     await websocket.accept()
     uuid = (await websocket.receive_text()).strip()
+    if not is_valid_uuid(uuid):  # it also names the capture file: keep it inside CAPTURE_DIR
+        await websocket.close(code=1008)
+        return
     scenario = config
     log_event(uuid, "connected", config=scenario.model_dump())
 

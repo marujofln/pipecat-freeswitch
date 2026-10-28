@@ -23,6 +23,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 
 import uvicorn
@@ -35,9 +36,27 @@ ESL_HOST = os.environ.get("FS_ESL_HOST", "127.0.0.1")
 ESL_PORT = int(os.environ.get("FS_ESL_PORT", "8021"))
 ESL_PASSWORD = os.environ.get("FS_ESL_PASSWORD", "ClueCon")
 PORT = int(os.environ.get("ECHO_PORT", "8765"))
+# FreeSWITCH shares the host network, so loopback is enough; anything wider exposes ESL control.
+HOST = os.environ.get("ECHO_HOST", "127.0.0.1")
 OUT_RATE = int(os.environ.get("OUT_SAMPLE_RATE", "16000"))
 CAPTURE_DIR = os.environ.get("CAPTURE_DIR", "./captures")
 IN_RATE = 16000  # matches "mono 16k" in the dialplan
+
+# Channel UUIDs go into ESL commands, where a newline would start another command, and into capture
+# file names, where a "/" would escape CAPTURE_DIR. Same check as pipecat_freeswitch.control.
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+
+def is_valid_uuid(value: str) -> bool:
+    """Whether ``value`` is a channel UUID in canonical form."""
+    return UUID_RE.fullmatch(value) is not None
+
+
+def require_uuid(uuid: str) -> str:
+    """Reject a URL path UUID that is not canonical."""
+    if not is_valid_uuid(uuid):
+        raise HTTPException(status_code=400, detail="not a channel UUID")
+    return uuid
 
 
 class CallConfig(BaseModel):
@@ -87,7 +106,8 @@ def spawn(coro) -> asyncio.Task:
 def log_event(uuid: str, kind: str, **fields) -> None:
     """Append one timestamped event to the call's JSONL capture."""
     line = json.dumps({"wall": time.time(), "kind": kind, **fields})
-    with open(os.path.join(CAPTURE_DIR, f"{uuid or 'unknown'}.jsonl"), "a") as f:
+    name = uuid if is_valid_uuid(uuid) else "unknown"
+    with open(os.path.join(CAPTURE_DIR, f"{name}.jsonl"), "a") as f:
         f.write(line + "\n")
 
 
@@ -139,6 +159,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
             if (text := msg.get("text")) is not None:
                 # First text message is the metadata passed as the last uuid_audio_stream argument.
                 if not uuid:
+                    if not is_valid_uuid(text.strip()):
+                        log_event("", "rejected_metadata", text=text[:200])
+                        await ws.close(code=1008)
+                        break
                     uuid = text.strip()
                     leg_configs[uuid] = config
                     log_event(uuid, "metadata", text=text, config=config.model_dump())
@@ -258,6 +282,7 @@ async def fs_api(command: str) -> str:
 @app.get("/break/{uuid}")
 async def do_break(uuid: str, all: bool = False) -> dict:
     """Experiment: uuid_break with and without ``all`` (does it clear the queued files?)."""
+    require_uuid(uuid)
     log_event(uuid, "uuid_break_request", all=all)
     result = await fs_api(f"uuid_break {uuid} all" if all else f"uuid_break {uuid}")
     log_event(uuid, "uuid_break", all=all, result=result)
@@ -267,6 +292,7 @@ async def do_break(uuid: str, all: bool = False) -> dict:
 @app.get("/kill/{uuid}")
 async def do_kill(uuid: str) -> dict:
     """Experiment: uuid_kill over ESL."""
+    require_uuid(uuid)
     log_event(uuid, "uuid_kill_request")
     result = await fs_api(f"uuid_kill {uuid}")
     log_event(uuid, "uuid_kill", result=result)
@@ -280,4 +306,4 @@ async def start_esl() -> None:
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info")

@@ -35,6 +35,12 @@ All notable changes to this project are documented here. The format follows
   `STREAM_EXTRA_HEADERS` (`bot_token` in vars.xml), so a client that can reach the WebSocket cannot name another
   call's UUID and interrupt or hang it up. The example bot needs `BOT_TOKEN`. The README documents the setup and
   the need for `wss://` or a private network. `bench/run_e2e.py` gains an `auth` scenario.
+- Bench echo server (`bench/echo_server.py`): it listened on all interfaces (with `network_mode: host`) and passed
+  the UUID from the URL of `/kill/{uuid}` and `/break/{uuid}`, and from the first WebSocket message, unchecked into
+  ESL commands and capture file names. Anyone who could reach port 8765 while the bench ran could run ESL commands
+  on the bench FreeSWITCH or append to files outside the captures directory. It now listens on `127.0.0.1`
+  (`ECHO_HOST` to change it), answers HTTP 400 to a non-canonical UUID and closes such a WebSocket with 1008.
+  `bench/tone_bot.py` validates the UUID too, since it names the capture file.
 
 ### Fixed
 
