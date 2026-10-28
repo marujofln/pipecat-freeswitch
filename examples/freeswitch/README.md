@@ -31,8 +31,13 @@ docker compose logs -f bot  # "Call <uuid> connected" when you dial 9996
 ```
 
 The bot listens on `127.0.0.1:8767` and uses the bench's token (`bench-token`, `bot_token` in `conf/vars.xml`). It
-refuses to start if a key is missing. Interrupt it while it speaks to see barge-in. With `TTS_PROVIDER=elevenlabs` in
-`.env`, set `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` instead of the Cartesia key.
+refuses to start if a key is missing. Interrupt it while it speaks to see barge-in.
+
+The providers are picked in `.env` (`STT_PROVIDER`, `LLM_PROVIDER`, `TTS_PROVIDER`; see `.env.example` and the
+[main README](../../README.md#example)). For example, `LLM_PROVIDER=openrouter` with `OPENROUTER_API_KEY` replaces
+the OpenAI key; `TTS_PROVIDER=elevenlabs` needs `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` instead of the
+Cartesia key. The image includes every provider's extra, so switching needs only `docker compose --profile bot up -d`
+again (no rebuild).
 
 ### Automated experiments
 

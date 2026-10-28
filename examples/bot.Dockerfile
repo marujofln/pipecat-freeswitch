@@ -5,9 +5,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Pipecat pinned to the version the package is tested with; both TTS providers, so TTS_PROVIDER works.
+# Pipecat pinned to the version the package is tested with, with every provider bot.py can select.
 RUN pip install --no-cache-dir \
-    "pipecat-ai[websocket,deepgram,openai,cartesia,elevenlabs,silero]==1.14.0" \
+    "pipecat-ai[websocket,deepgram,openai,openrouter,cartesia,elevenlabs,silero]==1.14.0" \
     python-dotenv uvicorn
 
 COPY pyproject.toml README.md LICENSE ./

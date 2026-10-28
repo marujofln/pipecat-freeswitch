@@ -228,13 +228,28 @@ FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks agains
 
 ## Example
 
-[`examples/bot.py`](examples/bot.py) is a complete voice bot: Deepgram STT, OpenAI LLM, Silero VAD, and a TTS service
-of your choice, **Cartesia** (default) or **ElevenLabs** (two different companies), selected with `TTS_PROVIDER`:
+[`examples/bot.py`](examples/bot.py) is a complete voice bot: speech-to-text, an LLM, Silero VAD and text-to-speech,
+each chosen with an environment variable:
 
-| `TTS_PROVIDER` | Variables | Pipecat extra |
+| Variable | Options (keys) | Pipecat extra |
 |---|---|---|
-| `cartesia` (default) | `CARTESIA_API_KEY`, optional `CARTESIA_VOICE_ID` | `cartesia` |
-| `elevenlabs` | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (required: no default voice) | `elevenlabs` |
+| `STT_PROVIDER` | `deepgram` (default; `DEEPGRAM_API_KEY`), `openrouter`* (`OPENROUTER_API_KEY`; `STT_MODEL`, default `openai/whisper-1`) | `deepgram`, `openrouter` |
+| `LLM_PROVIDER` | `openai` (default; `OPENAI_API_KEY`), `openrouter` (`OPENROUTER_API_KEY`); `LLM_MODEL`, default `gpt-4.1-mini` / `openai/gpt-4.1-mini` | `openai`, `openrouter` |
+| `TTS_PROVIDER` | `cartesia` (default; `CARTESIA_API_KEY`, optional `CARTESIA_VOICE_ID`), `elevenlabs` (`ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, required: no default voice), `openrouter`* (`OPENROUTER_API_KEY`; `TTS_MODEL`, default `openai/gpt-4o-mini-tts`, `TTS_VOICE`, default `alloy`) | `cartesia`, `elevenlabs`, `openrouter` |
+
+With OpenRouter, one key covers all three, and the LLM can be any model OpenRouter routes to (e.g.
+`LLM_MODEL=anthropic/claude-...`).
+
+\* **OpenRouter's speech services are experimental here.** OpenRouter's `/audio/transcriptions` and `/audio/speech`
+work request by request, not as streams, and Pipecat has no OpenRouter STT or TTS service, so the bot uses Pipecat's
+OpenAI services pointed at OpenRouter.
+- **STT:** each utterance is transcribed only after the VAD detects that the caller stopped talking, which adds the
+  upload and transcription time to every turn (Deepgram transcribes while the caller speaks).
+- **TTS:** Pipecat's OpenAI service accepts only OpenAI voice names, so stick to OpenAI's models
+  (`openai/gpt-4o-mini-tts`); it assumes 24 kHz PCM, so the pipeline output runs at 24 kHz and the serializer
+  resamples to the channel rate.
+- The requests were checked against a local server that mimics OpenRouter's documented API (paths, auth, multipart
+  upload, JSON body, 24 kHz output), but not against the live API.
 
 ```bash
 export BOT_TOKEN=...  # same value as bot_token in FreeSWITCH's vars.xml
@@ -247,10 +262,15 @@ uv run --with "pipecat-ai[websocket,deepgram,openai,cartesia,silero]" --with pyt
 export TTS_PROVIDER=elevenlabs ELEVENLABS_API_KEY=... ELEVENLABS_VOICE_ID=...
 uv run --with "pipecat-ai[websocket,deepgram,openai,elevenlabs,silero]" --with python-dotenv --with uvicorn \
   examples/bot.py
+
+# or with the LLM through OpenRouter
+export LLM_PROVIDER=openrouter OPENROUTER_API_KEY=... LLM_MODEL=openai/gpt-4.1-mini
+uv run --with "pipecat-ai[websocket,deepgram,openrouter,cartesia,silero]" --with python-dotenv --with uvicorn \
+  examples/bot.py
 ```
 
-Install only the extra of the provider you use. Both services synthesize at the pipeline output rate, so with
-`OUTPUT_RATE` equal to the channel rate in `bot.py` audio reaches FreeSWITCH without resampling. The ElevenLabs
+Install only the extras of the providers you use. Cartesia and ElevenLabs synthesize at the pipeline output rate,
+so with `OUTPUT_RATE` equal to the channel rate in `bot.py` audio reaches FreeSWITCH without resampling. The ElevenLabs
 service in Pipecat supports PCM output at 8, 16, 24, 32 and 48 kHz (`pcm_8000` ... `pcm_48000`); this has been
 checked in Pipecat's code, but neither provider has been run against its live API here.
 

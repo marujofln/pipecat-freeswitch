@@ -20,23 +20,34 @@ set in vars.xml (``<X-PRE-PROCESS cmd="set" data="bot_token=..."/>``). Use ``wss
 network, since over plain ``ws://`` the token travels in clear text.
 
 The bot also needs the FreeSWITCH event socket (mod_event_socket) to play audio, barge in and
-hang up. Environment: BOT_TOKEN, DEEPGRAM_API_KEY, OPENAI_API_KEY, and optionally
+hang up. Environment: BOT_TOKEN, the keys of the services below, and optionally
 FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD, HOST (0.0.0.0) and PORT (8765).
 
-The text-to-speech service is chosen with TTS_PROVIDER:
+Services, each chosen with an environment variable (keys in parentheses):
 
-- ``cartesia`` (default): CARTESIA_API_KEY, optionally CARTESIA_VOICE_ID.
-- ``elevenlabs``: ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID (required: the service has no
-  default voice).
+- STT_PROVIDER: ``deepgram`` (default; DEEPGRAM_API_KEY) or ``openrouter`` (OPENROUTER_API_KEY;
+  STT_MODEL, default ``openai/whisper-1``).
+- LLM_PROVIDER: ``openai`` (default; OPENAI_API_KEY) or ``openrouter`` (OPENROUTER_API_KEY).
+  LLM_MODEL sets the model: ``gpt-4.1-mini`` and ``openai/gpt-4.1-mini`` by default.
+- TTS_PROVIDER: ``cartesia`` (default; CARTESIA_API_KEY, optionally CARTESIA_VOICE_ID),
+  ``elevenlabs`` (ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID, required: the service has no
+  default voice) or ``openrouter`` (OPENROUTER_API_KEY; TTS_MODEL, default
+  ``openai/gpt-4o-mini-tts``, and TTS_VOICE, default ``alloy``).
 
-Run with the extra of the provider you use::
+OpenRouter's speech services are experimental here: they work request by request, not streamed.
+Speech-to-text transcribes each utterance only after the caller stops talking, which adds latency
+to every turn, and text-to-speech is assumed to return 24 kHz PCM, as OpenAI's does. They go
+through Pipecat's OpenAI services pointed at OpenRouter; this has not been run against the live API.
+
+Run with the extras of the providers you use (``openrouter`` covers all three OpenRouter options)::
 
     uv run --with "pipecat-ai[websocket,deepgram,openai,cartesia,silero]" examples/bot.py
-    TTS_PROVIDER=elevenlabs \
-        uv run --with "pipecat-ai[websocket,deepgram,openai,elevenlabs,silero]" examples/bot.py
+    LLM_PROVIDER=openrouter \
+        uv run --with "pipecat-ai[websocket,deepgram,openrouter,cartesia,silero]" examples/bot.py
 
-Both services synthesize at the pipeline output rate (OUTPUT_RATE below), so audio reaches
-FreeSWITCH without resampling.
+Cartesia and ElevenLabs synthesize at the channel rate (OUTPUT_RATE below), so bot audio reaches
+FreeSWITCH without resampling. OpenRouter's text-to-speech runs the pipeline output at 24 kHz, and
+the serializer resamples it to the channel rate.
 """
 
 import os
@@ -55,8 +66,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
@@ -73,22 +82,40 @@ STREAM_RATE = 8000
 # 8000 for PCMU/PCMA. For Opus use STREAM_RATE = 16000 ("16k") and OUTPUT_RATE = 48000.
 OUTPUT_RATE = 8000
 
+STT_PROVIDER = os.getenv("STT_PROVIDER", "deepgram").lower()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "cartesia").lower()
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# OpenAI's speech API returns 24 kHz PCM; OpenRouter's is assumed to do the same.
+OPENROUTER_TTS_RATE = 24000
+# Rate the TTS synthesizes at (the pipeline output rate); the serializer sends OUTPUT_RATE.
+TTS_RATE = OPENROUTER_TTS_RATE if TTS_PROVIDER == "openrouter" else OUTPUT_RATE
+
 # Shared secret that FreeSWITCH sends in the Authorization header (STREAM_EXTRA_HEADERS).
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Set BOT_TOKEN to the token FreeSWITCH sends (bot_token in vars.xml)")
 
-# Fail at startup, not in the middle of the first call, when a service key is missing.
-_TTS_KEYS = {
-    "cartesia": ["CARTESIA_API_KEY"],
-    "elevenlabs": ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"],
+# Variables each provider needs. Checked at startup, not in the middle of the first call.
+REQUIRED_ENV = {
+    "STT_PROVIDER": {"deepgram": ["DEEPGRAM_API_KEY"], "openrouter": ["OPENROUTER_API_KEY"]},
+    "LLM_PROVIDER": {"openai": ["OPENAI_API_KEY"], "openrouter": ["OPENROUTER_API_KEY"]},
+    "TTS_PROVIDER": {
+        "cartesia": ["CARTESIA_API_KEY"],
+        "elevenlabs": ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"],
+        "openrouter": ["OPENROUTER_API_KEY"],
+    },
 }
-_missing = [
-    name
-    for name in ["DEEPGRAM_API_KEY", "OPENAI_API_KEY"]
-    + _TTS_KEYS.get(os.getenv("TTS_PROVIDER", "cartesia").lower(), [])
-    if not os.getenv(name)
-]
+_chosen = {"STT_PROVIDER": STT_PROVIDER, "LLM_PROVIDER": LLM_PROVIDER, "TTS_PROVIDER": TTS_PROVIDER}
+_missing: list[str] = []
+for _role, _provider in _chosen.items():
+    if _provider not in REQUIRED_ENV[_role]:
+        choices = ", ".join(REQUIRED_ENV[_role])
+        raise RuntimeError(f"Unknown {_role} {_provider!r}; use one of: {choices}")
+    _missing += [
+        n for n in REQUIRED_ENV[_role][_provider] if not os.getenv(n) and n not in _missing
+    ]
 if _missing:
     raise RuntimeError(f"Set {', '.join(_missing)} (see .env.example)")
 
@@ -101,12 +128,60 @@ def is_authorized(websocket: WebSocket) -> bool:
     return secrets.compare_digest(auth.encode(), f"Bearer {BOT_TOKEN}".encode())
 
 
-def build_tts():
-    """Create the text-to-speech service selected by TTS_PROVIDER.
+# The provider modules are imported inside the builders, so only the extras you use need to be
+# installed.
 
-    The provider modules are imported here so only the extra you use needs to be installed.
-    """
-    provider = os.getenv("TTS_PROVIDER", "cartesia").lower()
+
+def build_stt():
+    """Create the speech-to-text service selected by STT_PROVIDER."""
+    if STT_PROVIDER == "openrouter":
+        # Segmented: Pipecat sends each utterance, after the VAD detects its end, as one request.
+        from pipecat.services.openai.stt import OpenAISTTService
+
+        return OpenAISTTService(
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            base_url=OPENROUTER_BASE_URL,
+            settings=OpenAISTTService.Settings(model=os.getenv("STT_MODEL", "openai/whisper-1")),
+        )
+    from pipecat.services.deepgram.stt import DeepgramSTTService
+
+    return DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+
+
+def build_llm():
+    """Create the LLM service selected by LLM_PROVIDER."""
+    if LLM_PROVIDER == "openrouter":
+        from pipecat.services.openrouter.llm import OpenRouterLLMService
+
+        return OpenRouterLLMService(
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            settings=OpenRouterLLMService.Settings(
+                model=os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
+            ),
+        )
+    from pipecat.services.openai.llm import OpenAILLMService
+
+    return OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        settings=OpenAILLMService.Settings(model=os.getenv("LLM_MODEL", "gpt-4.1-mini")),
+    )
+
+
+def build_tts():
+    """Create the text-to-speech service selected by TTS_PROVIDER."""
+    provider = TTS_PROVIDER
+    if provider == "openrouter":
+        from pipecat.services.openai.tts import OpenAITTSService
+
+        return OpenAITTSService(
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            base_url=OPENROUTER_BASE_URL,
+            sample_rate=OPENROUTER_TTS_RATE,
+            settings=OpenAITTSService.Settings(
+                model=os.getenv("TTS_MODEL", "openai/gpt-4o-mini-tts"),
+                voice=os.getenv("TTS_VOICE", "alloy"),
+            ),
+        )
     if provider == "cartesia":
         from pipecat.services.cartesia.tts import CartesiaTTSService
 
@@ -119,14 +194,11 @@ def build_tts():
     if provider == "elevenlabs":
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
-        voice_id = os.getenv("ELEVENLABS_VOICE_ID")
-        if not voice_id:
-            raise RuntimeError("TTS_PROVIDER=elevenlabs requires ELEVENLABS_VOICE_ID")
         return ElevenLabsTTSService(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
-            settings=ElevenLabsTTSService.Settings(voice=voice_id),
+            settings=ElevenLabsTTSService.Settings(voice=os.getenv("ELEVENLABS_VOICE_ID")),
         )
-    raise RuntimeError(f"Unknown TTS_PROVIDER {provider!r}; use 'cartesia' or 'elevenlabs'")
+    raise AssertionError(f"unchecked TTS_PROVIDER {provider!r}")  # validated at startup
 
 
 @app.websocket("/ws")
@@ -168,11 +240,8 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
         ),
     )
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(model="gpt-4.1-mini"),
-    )
+    stt = build_stt()
+    llm = build_llm()
     tts = build_tts()
 
     context = LLMContext(
@@ -204,7 +273,7 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
 
     worker = PipelineWorker(
         pipeline,
-        params=PipelineParams(audio_in_sample_rate=STREAM_RATE, audio_out_sample_rate=OUTPUT_RATE),
+        params=PipelineParams(audio_in_sample_rate=STREAM_RATE, audio_out_sample_rate=TTS_RATE),
     )
 
     @transport.event_handler("on_client_connected")
