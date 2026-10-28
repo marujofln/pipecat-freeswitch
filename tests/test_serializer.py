@@ -204,6 +204,18 @@ async def test_audio_before_uuid_is_held_and_sent_with_next_block(esl_server):
     await serializer.serialize(CancelFrame())
 
 
+async def test_audio_held_without_uuid_is_capped(esl_server):
+    serializer = make_serializer(esl_server, call_uuid=None)
+    await serializer.setup(SETUP)
+    for _ in range(350):  # 7 s of 20 ms frames, with no UUID yet
+        assert await serializer.serialize(audio_frame(20)) is None
+    await serializer.deserialize(UUID)
+    message = json.loads(await serializer.serialize(audio_frame(20)))
+    # Only the last 5 s are kept (8 kHz L16), plus the new frame.
+    assert len(base64.b64decode(message["data"]["audioData"])) == 5 * 16000 + 320
+    await serializer.serialize(CancelFrame())
+
+
 async def test_unknown_frames_and_messages_are_ignored(esl_server):
     serializer = make_serializer(esl_server)
     await serializer.setup(SETUP)

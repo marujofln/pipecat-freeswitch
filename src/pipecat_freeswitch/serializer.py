@@ -24,13 +24,17 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.serializers.base_serializer import FrameSerializer
 
-from pipecat_freeswitch.control import FreeSWITCHControl, is_valid_uuid
+from pipecat_freeswitch.control import DEFAULT_ESL_PASSWORD, FreeSWITCHControl, is_valid_uuid
 
 # Raw streamAudio payloads become .r8/.r16/... files, and mod_sndfile only plays raw audio at these
 # rates. 48 kHz is sent as WAV instead, which mod_sndfile plays at any rate.
 _RAW_SAMPLE_RATES = (8000, 16000, 24000, 32000)
 _WAV_SAMPLE_RATES = (48000,)
 _OUT_SAMPLE_RATES = _RAW_SAMPLE_RATES + _WAV_SAMPLE_RATES
+
+# Bot audio kept while the channel UUID is unknown. The UUID is mod_audio_stream's first message, so
+# hitting this means it never came: keep the latest audio instead of growing without bound.
+_MAX_HELD_SECS = 5
 
 
 class FreeSWITCHFrameSerializer(FrameSerializer):
@@ -102,7 +106,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         call_uuid: str | None = None,
         esl_host: str = "127.0.0.1",
         esl_port: int = 8021,
-        esl_password: str = "ClueCon",
+        esl_password: str = DEFAULT_ESL_PASSWORD,
         params: InputParams | None = None,
         *,
         control: FreeSWITCHControl | None = None,
@@ -162,6 +166,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             0  # streamAudio messages sent; mod_audio_stream numbers files the same way
         )
         self._held_audio = bytearray()  # bot audio produced before the control was ready
+        self._warned_held_audio = False
         self._hangup_attempted = False
 
     @property
@@ -213,6 +218,15 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             if not self._control.started:
                 # Nobody would play it yet: keep it and send it with the next block.
                 self._held_audio.extend(audio)
+                excess = len(self._held_audio) - _MAX_HELD_SECS * self._out_sample_rate * 2
+                if excess > 0:
+                    del self._held_audio[: excess + excess % 2]
+                    if not self._warned_held_audio:
+                        self._warned_held_audio = True
+                        logger.warning(
+                            f"{self}: no channel UUID yet, keeping only the last "
+                            f"{_MAX_HELD_SECS}s of bot audio"
+                        )
                 return None
             if self._held_audio:
                 audio = bytes(self._held_audio) + audio

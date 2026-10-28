@@ -7,8 +7,10 @@
 import asyncio
 
 import pytest
+from loguru import logger
 
-from fake_esl import play_path
+import pipecat_freeswitch.control
+from fake_esl import FakeESLServer, play_path
 from pipecat_freeswitch import FreeSWITCHControl
 
 UUID = "11111111-2222-3333-4444-555555555555"
@@ -105,6 +107,37 @@ async def test_channel_hang_up_closes_the_connection(esl_server, control):
     await esl_server.wait_until_all_closed()
     await control.hang_up()
     assert not any(c.startswith("api uuid_kill") for c in esl_server.commands)
+
+
+@pytest.fixture
+def warnings(monkeypatch):
+    monkeypatch.setattr(pipecat_freeswitch.control, "_warned_default_password", False)
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    yield messages
+    logger.remove(sink)
+
+
+def password_warnings(messages: list[str]) -> int:
+    return sum("default event socket password" in m for m in messages)
+
+
+async def test_default_password_warns_once_per_process(esl_server, warnings):
+    for _ in range(2):
+        control = FreeSWITCHControl(port=esl_server.port)
+        await control.start(UUID)
+        await control.stop()
+    assert password_warnings(warnings) == 1
+
+
+async def test_dedicated_password_does_not_warn(warnings):
+    server = FakeESLServer(password="s3cret")
+    await server.start()
+    control = FreeSWITCHControl(port=server.port, password="s3cret")
+    await control.start(UUID)
+    await control.stop()
+    await server.stop()
+    assert password_warnings(warnings) == 0
 
 
 async def test_playback_of_other_applications_is_ignored(esl_server, control):

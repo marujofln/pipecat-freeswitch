@@ -7,6 +7,7 @@
 """Call control over the FreeSWITCH event socket: playback, barge-in and hang-up."""
 
 import asyncio
+import contextlib
 import json
 import re
 
@@ -21,6 +22,10 @@ _EVENTS = "CHANNEL_EXECUTE_COMPLETE CHANNEL_HANGUP_COMPLETE CUSTOM mod_audio_str
 
 # The channel UUID goes into event socket commands, where a newline would start another command.
 _UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+# FreeSWITCH's out-of-the-box event socket password, kept as the default so the bench works as is.
+DEFAULT_ESL_PASSWORD = "ClueCon"
+_warned_default_password = False
 
 
 def is_valid_uuid(value: str) -> bool:
@@ -54,7 +59,7 @@ class FreeSWITCHControl:
         self,
         host: str = "127.0.0.1",
         port: int = 8021,
-        password: str = "ClueCon",
+        password: str = DEFAULT_ESL_PASSWORD,
         *,
         connect_timeout_secs: float = 5.0,
     ):
@@ -63,7 +68,9 @@ class FreeSWITCHControl:
         Args:
             host: FreeSWITCH event socket host.
             port: FreeSWITCH event socket port.
-            password: FreeSWITCH event socket password.
+            password: FreeSWITCH event socket password. The default is
+                FreeSWITCH's own ("ClueCon"); a warning is logged, once per
+                process, when a connection uses it.
             connect_timeout_secs: Timeout for connecting and authenticating.
         """
         self._host = host
@@ -122,12 +129,15 @@ class FreeSWITCHControl:
             self._conn = conn
             self._event_task = asyncio.create_task(self._event_loop())
             logger.debug(f"{self}: following channel {uuid}")
+            self._warn_if_default_password()
 
     async def stop(self):
         """Stop following the channel and close the connection."""
-        if self._event_task:
-            self._event_task.cancel()
-            self._event_task = None
+        task, self._event_task = self._event_task, None
+        if task and task is not asyncio.current_task():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         if self._conn:
             await self._conn.close()
             self._conn = None
@@ -257,6 +267,15 @@ class FreeSWITCHControl:
         async with self._changed:
             self._last_index = max(self._last_index, index)
             self._changed.notify_all()
+
+    def _warn_if_default_password(self):
+        global _warned_default_password
+        if self._password == DEFAULT_ESL_PASSWORD and not _warned_default_password:
+            _warned_default_password = True
+            logger.warning(
+                f"{self}: connected with FreeSWITCH's default event socket password; "
+                "set a dedicated one in event_socket.conf.xml and pass it as esl_password"
+            )
 
     def __str__(self) -> str:
         """Return a short name for logs."""

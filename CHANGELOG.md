@@ -17,6 +17,7 @@ All notable changes to this project are documented here. The format follows
 - Tests for the error paths of the event socket client and the control (failed commands, dropped connections,
   malformed events), and in-process integration tests that run a real Pipecat pipeline behind
   `FastAPIWebsocketTransport` with a client playing mod_audio_stream. CI enforces 95% branch coverage.
+- A warning, once per process, when the event socket is used with FreeSWITCH's default password ("ClueCon").
 
 ### Documentation
 
@@ -50,6 +51,9 @@ All notable changes to this project are documented here. The format follows
   `bench/tone_bot.py` validates the UUID too, since it names the capture file.
 
 ### Fixed
+
+- Bot audio held while the channel UUID is unknown could grow without bound; only the last 5 s are kept now, with
+  a warning. `FreeSWITCHControl.stop()` awaits the event task it cancels.
 
 - The sdist picked up local working files: 315 bench captures (3 MB of WAV and JSONL, ignored by git through
   `examples/freeswitch/captures/.gitignore`, which hatch does not read) and `CLAUDE.md`. It now lists its contents
