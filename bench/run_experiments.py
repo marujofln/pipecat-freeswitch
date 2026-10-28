@@ -18,8 +18,8 @@ Experiments:
   how much of the end of the speech is cut off?
 
 Each call (``--endpoint sip``, the default: a real SIP/RTP call from FreeSWITCH to itself through the
-bench-only profile on 127.0.0.1:5090; or ``--endpoint loopback``): the caller leg plays a 1 kHz tone and records what it hears
-(``captures/<caller>-caller.wav``); the dialplan leg streams to the echo server, which logs to
+bench-only profile on 127.0.0.1:5090; or ``--endpoint loopback``): the caller leg plays a 1 kHz tone and
+records what it hears (``captures/<caller>-caller.wav``); the dialplan leg streams to the echo server, which logs to
 ``captures/<leg>.jsonl``. Results are printed and written to ``captures/results-<timestamp>.json``.
 """
 
@@ -106,11 +106,7 @@ class Bench:
 
     def playbacks(self, uuid: str) -> list[tuple[float, float | None]]:
         """Return (start, end) of each playback on a channel; end is None if it never finished."""
-        starts = [
-            event_time(e)
-            for e in self.events_for(uuid, "CHANNEL_EXECUTE")
-            if e.get("Application") == "playback"
-        ]
+        starts = [event_time(e) for e in self.events_for(uuid, "CHANNEL_EXECUTE") if e.get("Application") == "playback"]
         ends = [
             event_time(e)
             for e in self.events_for(uuid, "CHANNEL_EXECUTE_COMPLETE")
@@ -129,7 +125,9 @@ class Bench:
         """Call the echo server's HTTP API (blocking; run it in a thread)."""
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
-            f"{self.echo_url}{path}", data=data, method=method,
+            f"{self.echo_url}{path}",
+            data=data,
+            method=method,
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -139,17 +137,23 @@ class Bench:
         """Async wrapper around ``http``."""
         return await asyncio.to_thread(self.http, method, path, body)
 
-    async def place_call(
-        self, mode: str, chunk_ms: int, tone_seconds: float = 3.0, **config: object
-    ) -> Call:
+    async def place_call(self, mode: str, chunk_ms: int, tone_seconds: float = 3.0, **config: object) -> Call:
         """Configure the echo server, originate a loopback call to 9999 and start recording.
 
         Extra keyword arguments are passed to the echo server's ``/config`` (``paced``, ``jitter_ms``, ...).
         """
-        await self.echo_api("POST", "/config", {
-            "mode": mode, "chunk_ms": chunk_ms, "tone_seconds": tone_seconds,
-            "play_method": self.play_method, "out_rate": self.out_rate, **config,
-        })
+        await self.echo_api(
+            "POST",
+            "/config",
+            {
+                "mode": mode,
+                "chunk_ms": chunk_ms,
+                "tone_seconds": tone_seconds,
+                "play_method": self.play_method,
+                "out_rate": self.out_rate,
+                **config,
+            },
+        )
         call = Call(caller_uuid=str(uuidlib.uuid4()))
         since = time.time()
         codec = f",absolute_codec_string={self.codec}" if self.codec else ""
@@ -348,8 +352,14 @@ async def experiment_pacing(
 ) -> dict:
     """Real-time paced blocks: count playback underruns (queue empty when a file ends)."""
     call = await bench.place_call(
-        "tone", chunk_ms, tone_seconds, paced=True, jitter_ms=jitter_ms, prebuffer_blocks=prebuffer,
-        start_delay_s=0.5, seed=chunk_ms * 1000 + int(jitter_ms),
+        "tone",
+        chunk_ms,
+        tone_seconds,
+        paced=True,
+        jitter_ms=jitter_ms,
+        prebuffer_blocks=prebuffer,
+        start_delay_s=0.5,
+        seed=chunk_ms * 1000 + int(jitter_ms),
     )
     await asyncio.sleep(0.5 + tone_seconds + (prebuffer * chunk_ms + jitter_ms) / 1000 + 1.5)
     await bench.hang_up(call)
@@ -381,7 +391,12 @@ async def experiment_pacing(
 async def experiment_hangup(bench: Bench, mode: str, chunk_ms: int = 200, tone_seconds: float = 3.0) -> dict:
     """Paced tone, then uuid_kill right after the last block or after the last file finished."""
     call = await bench.place_call(
-        "tone", chunk_ms, tone_seconds, paced=True, start_delay_s=0.5, hangup=mode,
+        "tone",
+        chunk_ms,
+        tone_seconds,
+        paced=True,
+        start_delay_s=0.5,
+        hangup=mode,
     )
     await asyncio.sleep(0.5 + tone_seconds + 3.0)
     await bench.hang_up(call)
@@ -414,12 +429,16 @@ async def main() -> None:
     parser.add_argument("--jitters", default="0,20,50", help="max random send delay (ms) for pacing")
     parser.add_argument("--prebuffers", default="0,1", help="prebuffer sizes (blocks) for pacing")
     parser.add_argument(
-        "--play-method", default="sendmsg", choices=["broadcast", "sendmsg"],
+        "--play-method",
+        default="sendmsg",
+        choices=["broadcast", "sendmsg"],
         help="how the echo server plays files: uuid_broadcast or ESL sendmsg execute",
     )
     parser.add_argument("--out-rate", type=int, default=16000, help="tone sample rate sent in streamAudio")
     parser.add_argument(
-        "--endpoint", default="sip", choices=sorted(DIAL_STRINGS),
+        "--endpoint",
+        default="sip",
+        choices=sorted(DIAL_STRINGS),
         help="how calls reach extension 9999: SIP/RTP to itself, or mod_loopback",
     )
     parser.add_argument("--esl", default="127.0.0.1:8021")
@@ -432,15 +451,21 @@ async def main() -> None:
     conn = await EslConnection.connect(host, int(port), args.esl_password)
     await conn.subscribe(SUBSCRIPTIONS)
     bench = Bench(
-        conn=conn, echo_url=args.echo_url, captures=args.captures, play_method=args.play_method,
-        out_rate=args.out_rate, endpoint=args.endpoint,
+        conn=conn,
+        echo_url=args.echo_url,
+        captures=args.captures,
+        play_method=args.play_method,
+        out_rate=args.out_rate,
+        endpoint=args.endpoint,
     )
     collector = asyncio.create_task(bench.collect_events())
 
     selected = args.experiments.split(",")
     results: dict[str, object] = {
-        "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "play_method": args.play_method,
-        "out_rate": args.out_rate, "endpoint": args.endpoint,
+        "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "play_method": args.play_method,
+        "out_rate": args.out_rate,
+        "endpoint": args.endpoint,
     }
     try:
         if "input" in selected:

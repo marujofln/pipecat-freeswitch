@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,7 +15,42 @@ jobs:
           python-version: "3.12"
       - name: Lint
         run: |
-          uv run --group dev ruff check src tests
-          uv run --group dev ruff format --check src tests
+          uv run --group dev ruff check .
+          uv run --group dev ruff format --check src tests bench examples
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+        # "locked": the versions in uv.lock, which pin pipecat-ai at the minimum we support.
+        # "latest": the newest releases, so a new Pipecat that breaks the serializer shows up here.
+        deps: [locked, latest]
+    name: test (Python ${{ matrix.python-version }}, ${{ matrix.deps }} dependencies)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
       - name: Unit and integration tests, with coverage
-        run: uv run --group dev pytest --cov --cov-report=term-missing
+        run: |
+          if [ "${{ matrix.deps }}" = latest ]; then upgrade=--upgrade; else upgrade=--locked; fi
+          uv run $upgrade --group dev python -c "import pipecat; print('pipecat', pipecat.__version__)"
+          uv run $upgrade --group dev pytest --cov --cov-report=term-missing
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Build and check the contents
+        run: |
+          uv build
+          # Only the package (and, in the sdist, its tests and example) may ship.
+          python -m zipfile -l dist/*.whl
+          tar tzf dist/*.tar.gz
+          ! tar tzf dist/*.tar.gz | grep -v -E '^[^/]+/(src/pipecat_freeswitch/|tests/|examples/bot\.py$|README\.md$|CHANGELOG\.md$|LICENSE$|pyproject\.toml$|PKG-INFO$|\.gitignore$|$)'
+          python -m zipfile -l dist/*.whl | grep -q 'pipecat_freeswitch/py.typed'

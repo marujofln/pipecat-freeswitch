@@ -26,13 +26,14 @@ FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD.
 The text-to-speech service is chosen with TTS_PROVIDER:
 
 - ``cartesia`` (default): CARTESIA_API_KEY, optionally CARTESIA_VOICE_ID.
-- ``elevenlabs``: ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID (required: the service has no default voice).
+- ``elevenlabs``: ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID (required: the service has no
+  default voice).
 
 Run with the extra of the provider you use::
 
     uv run --with "pipecat-ai[websocket,deepgram,openai,cartesia,silero]" examples/bot.py
-    TTS_PROVIDER=elevenlabs uv run --with "pipecat-ai[websocket,deepgram,openai,elevenlabs,silero]" \
-        examples/bot.py
+    TTS_PROVIDER=elevenlabs \
+        uv run --with "pipecat-ai[websocket,deepgram,openai,elevenlabs,silero]" examples/bot.py
 
 Both services synthesize at the pipeline output rate (OUTPUT_RATE below), so audio reaches
 FreeSWITCH without resampling.

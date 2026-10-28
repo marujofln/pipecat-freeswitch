@@ -68,12 +68,13 @@ class EslConnection:
         return body.strip()
 
     async def execute(self, uuid: str, app: str, arg: str) -> str:
-        """Queue a dialplan app on a channel via ``sendmsg``, like ``uuid_broadcast`` but without
-        its hardcoded ``lead-frames: 5`` (100 ms of discarded frames at 20 ms ptime per app).
+        """Queue a dialplan app on a channel via ``sendmsg``.
+
+        Like ``uuid_broadcast``, but without its hardcoded ``lead-frames: 5`` (100 ms of discarded
+        frames at 20 ms ptime per app).
         """
         headers, _ = await self.send(
-            f"sendmsg {uuid}\ncall-command: execute\nexecute-app-name: {app}\n"
-            f"execute-app-arg: {arg}\nevent-lock: true"
+            f"sendmsg {uuid}\ncall-command: execute\nexecute-app-name: {app}\nexecute-app-arg: {arg}\nevent-lock: true"
         )
         return headers.get("Reply-Text", "")
 

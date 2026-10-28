@@ -27,10 +27,9 @@ import re
 import time
 
 import uvicorn
+from esl import EslConnection
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-
-from esl import EslConnection
 
 ESL_HOST = os.environ.get("FS_ESL_HOST", "127.0.0.1")
 ESL_PORT = int(os.environ.get("FS_ESL_PORT", "8021"))
@@ -128,9 +127,7 @@ def stream_audio_message(pcm: bytes, rate: int) -> str:
 def tone_pcm(seconds: float, rate: int, freq: float = 440.0) -> bytes:
     """Generate a sine tone as L16 mono."""
     n = int(seconds * rate)
-    return array.array(
-        "h", (int(8000 * math.sin(2 * math.pi * freq * i / rate)) for i in range(n))
-    ).tobytes()
+    return array.array("h", (int(8000 * math.sin(2 * math.pi * freq * i / rate)) for i in range(n))).tobytes()
 
 
 @app.post("/config")
@@ -229,9 +226,7 @@ async def wait_playbacks(uuid: str, count: int, timeout: float) -> None:
     """Wait until ``count`` playback apps have finished on the channel (or the timeout expires)."""
     async with playback_changed:
         try:
-            await asyncio.wait_for(
-                playback_changed.wait_for(lambda: playbacks_done.get(uuid, 0) >= count), timeout
-            )
+            await asyncio.wait_for(playback_changed.wait_for(lambda: playbacks_done.get(uuid, 0) >= count), timeout)
         except TimeoutError:
             log_event(uuid, "wait_playbacks_timeout", done=playbacks_done.get(uuid, 0), expected=count)
 

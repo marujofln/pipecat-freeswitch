@@ -78,9 +78,7 @@ def log_event(uuid: str, kind: str, **fields) -> None:
 def tone_frames(seconds: float, rate: int) -> list[OutputAudioRawFrame]:
     """A 440 Hz tone as 20 ms output frames."""
     samples = int(seconds * rate)
-    pcm = array.array(
-        "h", (int(8000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(samples))
-    )
+    pcm = array.array("h", (int(8000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(samples)))
     step = rate // 50
     return [
         OutputAudioRawFrame(audio=pcm[i : i + step].tobytes(), sample_rate=rate, num_channels=1)
@@ -97,6 +95,7 @@ class InputCounter(FrameProcessor):
         self.bytes = 0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Count caller audio and pass every frame on."""
         await super().process_frame(frame, direction)
         if isinstance(frame, InputAudioRawFrame):
             self.frames += 1
@@ -147,9 +146,7 @@ async def ws_endpoint(websocket: WebSocket):
     counter = InputCounter()
     worker = PipelineWorker(
         Pipeline([transport.input(), counter, transport.output()]),
-        params=PipelineParams(
-            audio_in_sample_rate=scenario.in_rate, audio_out_sample_rate=scenario.pipeline_out_rate
-        ),
+        params=PipelineParams(audio_in_sample_rate=scenario.in_rate, audio_out_sample_rate=scenario.pipeline_out_rate),
     )
 
     @transport.event_handler("on_client_connected")

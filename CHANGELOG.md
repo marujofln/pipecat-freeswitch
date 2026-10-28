@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format follows
 - Tests for the error paths of the event socket client and the control (failed commands, dropped connections,
   malformed events), and in-process integration tests that run a real Pipecat pipeline behind
   `FastAPIWebsocketTransport` with a client playing mod_audio_stream. CI enforces 95% branch coverage.
+- `pytest -m bench` runs the end-to-end calls of `bench/run_e2e.py` against the FreeSWITCH bench and checks their
+  results; deselected by default and skipped when the bench is not running.
+- CI: tests on Python 3.12 and 3.13, each with the locked and the latest dependencies; lint of `bench/` and
+  `examples/` too (the bench at 120 columns); a check of the wheel and sdist contents.
+- Release workflow: publishes to PyPI through trusted publishing when a `v*` tag matching the version is pushed.
+- The package ships `py.typed`. Python 3.13 classifier.
 - A warning, once per process, when the event socket is used with FreeSWITCH's default password ("ClueCon").
 
 ### Documentation
@@ -54,6 +60,7 @@ All notable changes to this project are documented here. The format follows
 
 - Bot audio held while the channel UUID is unknown could grow without bound; only the last 5 s are kept now, with
   a warning. `FreeSWITCHControl.stop()` awaits the event task it cancels.
+- The version is written only in `pipecat_freeswitch.__version__`; `pyproject.toml` reads it from there.
 
 - The sdist picked up local working files: 315 bench captures (3 MB of WAV and JSONL, ignored by git through
   `examples/freeswitch/captures/.gitignore`, which hatch does not read) and `CLAUDE.md`. It now lists its contents

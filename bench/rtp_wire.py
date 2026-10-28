@@ -140,20 +140,47 @@ async def main() -> None:
     name = f"wire-{time.strftime('%Y%m%d-%H%M%S')}"
     subprocess.run(["docker", "rm", "-f", CAPTURE_CONTAINER], capture_output=True)
     subprocess.run(
-        compose("run", "-d", "--rm", "--name", CAPTURE_CONTAINER, "tcpdump",
-                "-i", "lo", "-Z", "root", "-w", f"/captures/{name}.pcap", "udp", "portrange", RTP_PORTS),
-        check=True, capture_output=True,
+        compose(
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            CAPTURE_CONTAINER,
+            "tcpdump",
+            "-i",
+            "lo",
+            "-Z",
+            "root",
+            "-w",
+            f"/captures/{name}.pcap",
+            "udp",
+            "portrange",
+            RTP_PORTS,
+        ),
+        check=True,
+        capture_output=True,
     )
     await asyncio.sleep(2.0)  # let tcpdump start
 
     conn = await EslConnection.connect("127.0.0.1", 8021, "ClueCon")
     await conn.subscribe(SUBSCRIPTIONS)
-    bench = Bench(conn=conn, echo_url="http://127.0.0.1:8765", captures=captures,
-                  play_method=args.play_method, out_rate=8000, endpoint="sip")
+    bench = Bench(
+        conn=conn,
+        echo_url="http://127.0.0.1:8765",
+        captures=captures,
+        play_method=args.play_method,
+        out_rate=8000,
+        endpoint="sip",
+    )
     collector = asyncio.create_task(bench.collect_events())
     try:
         call = await bench.place_call(
-            "tone", args.chunk_ms, args.tone_seconds, envelope="ramp", paced=args.paced, start_delay_s=0.5,
+            "tone",
+            args.chunk_ms,
+            args.tone_seconds,
+            envelope="ramp",
+            paced=args.paced,
+            start_delay_s=0.5,
         )
         port = int(await conn.api(f"uuid_getvar {call.leg_uuid} local_media_port"))
         await asyncio.sleep(0.5 + args.tone_seconds + 2.0)

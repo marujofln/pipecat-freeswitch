@@ -100,8 +100,10 @@ pipecat-freeswitch/
 │   ├── test_control.py     # error paths of FreeSWITCHControl
 │   ├── test_esl.py         # error paths of ESLConnection, event parsing
 │   ├── test_integration.py # real pipeline + FastAPIWebsocketTransport on uvicorn, client playing mod_audio_stream
+│   ├── test_bench.py       # marker "bench": drives bench/run_e2e.py against the running bench (pytest -m bench)
 │   └── fake_esl.py         # fake event socket (error replies, drops, auto-completed playback, open-connection count)
-├── .github/workflows/      # lint, unit and integration tests with branch coverage (fail under 95%)
+├── .github/workflows/      # ci.yml: lint, tests on Python 3.12/3.13 x locked/latest dependencies with branch
+│                           #   coverage (fail under 95%), package contents; release.yml: PyPI on a v* tag
 ├── CHANGELOG.md
 ├── LICENSE                 # BSD-2
 ├── README.md

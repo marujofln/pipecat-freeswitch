@@ -48,7 +48,9 @@ def freeswitch_cpu_secs() -> float:
     """CPU time (user + system) used so far by the FreeSWITCH process in the bench container."""
     out = subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE), "exec", "-T", "freeswitch", "cat", "/proc/1/stat"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     fields = out.rsplit(")", 1)[1].split()
     return (int(fields[11]) + int(fields[12])) / 100  # utime, stime in clock ticks (USER_HZ = 100)
@@ -82,8 +84,7 @@ def tone_residuals(bench: Bench, call: Call) -> list[float]:
     return [
         r
         for i, r in enumerate(windows)
-        if r is not None and 0 < i < len(windows) - 1
-        and windows[i - 1] is not None and windows[i + 1] is not None
+        if r is not None and 0 < i < len(windows) - 1 and windows[i - 1] is not None and windows[i + 1] is not None
     ]
 
 
@@ -181,9 +182,7 @@ async def run_auth() -> dict:
     }
 
 
-async def run_interrupt(
-    bench: Bench, tone_seconds: float, after_s: float, chunks: int, rates: dict
-) -> dict:
+async def run_interrupt(bench: Bench, tone_seconds: float, after_s: float, chunks: int, rates: dict) -> dict:
     """Bot is interrupted while playing a tone."""
     call = await bench.place_call(
         "bot",

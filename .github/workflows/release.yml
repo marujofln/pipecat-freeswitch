@@ -1,0 +1,44 @@
+name: Release
+
+# Publishes to PyPI when a version tag is pushed (git tag v0.1.0 && git push origin v0.1.0).
+# Uses PyPI trusted publishing, so no token is stored in the repository. One-time setup on pypi.org:
+# add a trusted publisher for project "pipecat-freeswitch", owner "marujofln", repository
+# "pipecat-freeswitch", workflow "release.yml", environment "pypi".
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Check that the tag matches the package version
+        run: |
+          version=$(uv run --no-project python -c "import re, pathlib; print(re.search(r'__version__ = \"(.+)\"', pathlib.Path('src/pipecat_freeswitch/__init__.py').read_text()).group(1))")
+          test "v$version" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v$version"; exit 1; }
+      - name: Tests
+        run: uv run --locked --group dev pytest
+      - name: Build
+        run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

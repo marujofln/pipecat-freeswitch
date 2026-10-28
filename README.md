@@ -261,8 +261,11 @@ set as in [FreeSWITCH setup](#freeswitch-setup). The bot refuses to start withou
 uv sync --group dev
 uv run pytest --cov                    # all tests, with branch coverage (CI requires 95%)
 uv run pytest -m "not integration"     # unit tests only
-uv run ruff check src tests && uv run ruff format --check src tests
+uv run ruff check . && uv run ruff format --check src tests bench examples
 ```
+
+CI runs the tests on Python 3.12 and 3.13, with both the locked dependencies (the minimum Pipecat supported) and the
+latest releases, and checks that the wheel and sdist contain only what they should.
 
 No FreeSWITCH is needed. Unit tests use a fake event socket. The integration tests (`tests/test_integration.py`)
 run a real Pipecat pipeline behind `FastAPIWebsocketTransport` on uvicorn, with a WebSocket client playing
@@ -274,10 +277,20 @@ the serializer with a real Pipecat pipeline:
 
 ```bash
 cd examples/freeswitch && docker compose up -d && cd ../..
-uv pip install "pipecat-ai[websocket]" fastapi "uvicorn[standard]"
+uv sync --group dev
 .venv/bin/python bench/tone_bot.py &   # Pipecat bot on extension 9998
-python3 bench/run_e2e.py               # token check, tone + hang-up after speech, and interruption
+uv run pytest -m bench                 # token check, tone + hang-up after speech, and interruption
+python3 bench/run_e2e.py               # the same calls, printing every measurement
 ```
+
+The `bench` tests are deselected by default and skipped when the bench or the bot is not running.
+
+### Releasing
+
+Bump `__version__` in `src/pipecat_freeswitch/__init__.py` (the only place the version is written), move the
+CHANGELOG's "Unreleased" entries under the new version, then tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+The `Release` workflow checks that the tag matches the version, runs the tests, builds, and publishes to PyPI through
+trusted publishing (one-time setup on pypi.org: see the comment at the top of `.github/workflows/release.yml`).
 
 The bench README documents the phase 0 measurements that shaped the design: why playback uses `sendmsg`, why
 `uuid_break` needs `all`, and why hang-up waits for playback.
