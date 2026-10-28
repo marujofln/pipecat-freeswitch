@@ -87,6 +87,26 @@ canonical UUIDs, so the message cannot inject event socket commands.)
 - A single shared token lets whoever holds it name any call. A per-call token (an HMAC of the channel UUID, checked
   against the first message) would limit a leak to one call; it is not implemented yet.
 
+#### Managing the token
+
+The same value goes in two places: `bot_token` in FreeSWITCH's `vars.xml`, which sends it, and `BOT_TOKEN` in the
+bot's environment, which checks it.
+
+- **Generate** a long random hex value: `openssl rand -hex 32` or
+  `python3 -c "import secrets; print(secrets.token_hex(32))"`. Stick to letters and digits: the value goes through
+  an XML attribute, a JSON string in `STREAM_EXTRA_HEADERS` and an HTTP header, where `"`, `&`, `<`, `\`, `$` or
+  `{}` would break one of them.
+- **FreeSWITCH**: `$${bot_token}` is expanded when the XML is loaded, so run `fs_cli -x reloadxml` (or restart)
+  after changing it. Make `vars.xml` readable only by the FreeSWITCH user (e.g. `chmod 640`).
+- **Bot**: `examples/bot.py` reads `BOT_TOKEN` from the environment or from a `.env` file (`python-dotenv`), which
+  is git-ignored. Restart the bot after changing it.
+- **Never commit the real token.** `bench-token` in the bench's `vars.xml` is for the test bench only, and is what
+  `bench/tone_bot.py` uses when `BOT_TOKEN` is unset.
+- **Visibility**: the token is a channel variable, so it shows up in `uuid_dump` and possibly in CDRs. Only those
+  with fs_cli or event socket access can see it, and they already have full control of FreeSWITCH.
+- **Rotation**: change both sides and restart or reload them. While the two values differ, new calls are refused
+  (HTTP 403); calls in progress are not affected, since the token is only checked on connection. To rotate with no
+  refused calls, the bot would have to accept the old and the new token for a while; this is not implemented.
 
 ## Usage
 
