@@ -185,7 +185,9 @@ the call was still up, the call parked. Two safeguards:
 
 - `serializer.cleanup()`, which the application calls from `on_client_disconnected` after `worker.cancel()`
   (`examples/bot.py`, `bench/tone_bot.py`, README). No Pipecat transport calls a serializer's cleanup, so this is the
-  application's job until Pipecat does it (worth an upstream issue).
+  application's job until Pipecat does it: reported in
+  [pipecat-ai/pipecat#6440](https://github.com/pipecat-ai/pipecat/issues/6440), which proposes that the output
+  transport's `cleanup()` call the serializer's.
 - `FreeSWITCHControl` closes its own connection on `CHANNEL_HANGUP_COMPLETE`, so the connection never outlives the call
   even if the application forgets `cleanup()`.
 

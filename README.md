@@ -158,7 +158,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
 Call `serializer.cleanup()` when the WebSocket closes. Once it is closed, the transport stops passing frames to the
 serializer, so the `CancelFrame` that ends the pipeline never reaches it; without `cleanup()`, a WebSocket that drops
-while the call is up leaves the call parked and the event socket connection open until the call ends.
+while the call is up leaves the call parked and the event socket connection open until the call ends. This is a gap
+in Pipecat's transport, which affects its own telephony serializers too, reported in
+[pipecat-ai/pipecat#6440](https://github.com/pipecat-ai/pipecat/issues/6440).
 
 `call_uuid` is optional: without it the serializer takes the UUID from the first message and holds bot audio until
 the event socket is ready. Reading it yourself, as above, lets the serializer connect during pipeline setup.
