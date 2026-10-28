@@ -15,6 +15,16 @@ mod_audio_stream authors.
 > and a desk phone (Grandstream) to the full STT → LLM → TTS example (all three on OpenRouter), barge-in included.
 > Deepgram, OpenAI, Cartesia and ElevenLabs direct have not been run against their live APIs yet.
 
+## Demo
+
+A phone call to the [example bot](#example) on the test bench (extension 9996; STT, LLM and TTS through
+OpenRouter). The caller interrupts the bot twice, and each time the bot goes silent about 0.4 s after the caller
+starts talking. The video is FreeSWITCH's stereo recording of the call (caller on top, bot below), with captions
+taken from the bot's log.
+
+<!-- Drag demo.mp4 here in the GitHub editor: it becomes a https://github.com/user-attachments/assets/... link
+     that plays inline. -->
+
 ## How it works
 
 ```
