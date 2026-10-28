@@ -20,6 +20,13 @@ All notable changes to this project are documented here. The format follows
 - `freeswitch_out_sample_rate` defaults to the pipeline output rate when FreeSWITCH can play it, so bot audio is
   not resampled. 64 kHz is no longer accepted.
 
+### Security
+
+- The channel UUID is now validated (canonical 8-4-4-4-12 hex form) before it is used in event socket commands.
+  Previously, any client that could reach the bot's WebSocket could send a first message with a newline in the
+  "UUID" and run arbitrary ESL commands on FreeSWITCH (e.g. `api system ...`). A malformed `call_uuid` now raises
+  `ValueError`; a malformed first message is logged and ignored.
+
 ### Fixed
 
 - Bot audio resampled by the serializer lost the end of each utterance: the default SOXR "VHQ" stream resampler

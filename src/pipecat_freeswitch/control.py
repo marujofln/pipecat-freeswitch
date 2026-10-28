@@ -19,6 +19,21 @@ _FILE_INDEX = re.compile(r"_(\d+)\.tmp\.[^./]+$")
 
 _EVENTS = "CHANNEL_EXECUTE_COMPLETE CHANNEL_HANGUP_COMPLETE CUSTOM mod_audio_stream::play"
 
+# The channel UUID goes into event socket commands, where a newline would start another command.
+_UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+
+def is_valid_uuid(value: str) -> bool:
+    """Whether ``value`` is a channel UUID in canonical form (8-4-4-4-12 hex digits).
+
+    Args:
+        value: The candidate UUID.
+
+    Returns:
+        True if it is safe to use in event socket commands.
+    """
+    return _UUID.fullmatch(value) is not None
+
 
 class FreeSWITCHControl:
     """Drives one FreeSWITCH channel for a mod_audio_stream session.
@@ -88,9 +103,12 @@ class FreeSWITCHControl:
             uuid: UUID of the channel running ``uuid_audio_stream``.
 
         Raises:
+            ValueError: If ``uuid`` is not a canonical UUID.
             ESLError: If the event socket refuses the connection or a command.
             OSError: If the event socket cannot be reached.
         """
+        if not is_valid_uuid(uuid):
+            raise ValueError(f"not a channel UUID: {uuid!r}")
         async with self._start_lock:
             if self._conn:
                 return

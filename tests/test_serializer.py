@@ -85,6 +85,55 @@ async def test_uuid_from_json_metadata(esl_server):
     await serializer.serialize(CancelFrame())
 
 
+INJECTED = "api system touch /tmp/pwned"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param(f"x\n\n{INJECTED}", id="plain-text"),
+        pytest.param(f"{UUID}\n\n{INJECTED}", id="plain-text-after-valid-uuid"),
+        pytest.param(json.dumps({"uuid": f"x\n\n{INJECTED}"}), id="json"),
+        pytest.param(json.dumps({"uuid": f"{UUID}\n\n{INJECTED}"}), id="json-after-valid-uuid"),
+        pytest.param(f"{UUID} all", id="trailing-argument"),
+        pytest.param("not-a-uuid", id="not-a-uuid"),
+    ],
+)
+async def test_first_message_cannot_inject_esl_commands(esl_server, message):
+    # Any WebSocket client can send the first text message, and the UUID goes into ESL commands.
+    serializer = make_serializer(esl_server, call_uuid=None)
+    await serializer.setup(SETUP)
+    assert await serializer.deserialize(message) is None
+    assert serializer.call_uuid is None
+    await asyncio.sleep(0.1)
+    assert esl_server.commands == []
+    await serializer.serialize(CancelFrame())
+
+
+async def test_valid_uuid_still_accepted_after_rejected_message(esl_server):
+    serializer = make_serializer(esl_server, call_uuid=None)
+    await serializer.setup(SETUP)
+    await serializer.deserialize(f"x\n\n{INJECTED}")
+    await serializer.deserialize(UUID)
+    assert serializer.call_uuid == UUID
+    await esl_server.wait_for_command(f"filter Unique-ID {UUID}")
+    assert not any(INJECTED in c for c in esl_server.commands)
+    await serializer.serialize(CancelFrame())
+
+
+def test_rejects_malformed_call_uuid():
+    with pytest.raises(ValueError, match="canonical UUID"):
+        FreeSWITCHFrameSerializer(call_uuid=f"{UUID}\n\n{INJECTED}")
+
+
+async def test_control_rejects_malformed_uuid(esl_server):
+    control = FreeSWITCHControl(port=esl_server.port)
+    with pytest.raises(ValueError, match="not a channel UUID"):
+        await control.start(f"{UUID}\n\n{INJECTED}")
+    assert not control.started
+    assert esl_server.commands == []
+
+
 async def test_caller_audio_is_resampled_to_pipeline_rate(esl_server):
     serializer = make_serializer(esl_server, freeswitch_sample_rate=8000)
     await serializer.setup(SETUP)

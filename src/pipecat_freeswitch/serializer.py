@@ -24,7 +24,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.serializers.base_serializer import FrameSerializer
 
-from pipecat_freeswitch.control import FreeSWITCHControl
+from pipecat_freeswitch.control import FreeSWITCHControl, is_valid_uuid
 
 # Raw streamAudio payloads become .r8/.r16/... files, and mod_sndfile only plays raw audio at these
 # rates. 48 kHz is sent as WAV instead, which mod_sndfile plays at any rate.
@@ -118,7 +118,8 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
                 ``esl_*`` arguments.
 
         Raises:
-            ValueError: If a sample rate is not supported by mod_audio_stream.
+            ValueError: If a sample rate is not supported by mod_audio_stream,
+                or ``call_uuid`` is not a canonical UUID.
         """
         params = params or FreeSWITCHFrameSerializer.InputParams()
         super().__init__(params)
@@ -138,6 +139,8 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
                 f"freeswitch_out_sample_rate must be one of {_OUT_SAMPLE_RATES}, "
                 f"got {self._out_sample_rate}"
             )
+        if call_uuid is not None and not is_valid_uuid(call_uuid):
+            raise ValueError(f"call_uuid must be a canonical UUID, got {call_uuid!r}")
 
         self._call_uuid = call_uuid
         self._control = control or FreeSWITCHControl(esl_host, esl_port, esl_password)
@@ -244,7 +247,9 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
 
         Binary messages are caller audio. The first text message is the
         metadata given to ``uuid_audio_stream``: the channel UUID, either as
-        plain text or as a JSON object with a ``uuid`` field.
+        plain text or as a JSON object with a ``uuid`` field. Anything that is
+        not a canonical UUID is rejected, since the UUID goes into event socket
+        commands and any WebSocket client can send this message.
 
         Args:
             data: The raw WebSocket data from FreeSWITCH.
@@ -265,7 +270,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             if self._call_uuid:
                 await self._control.start(self._call_uuid)
             else:
-                logger.error(f"{self}: no channel UUID in the first message: {data!r}")
+                logger.error(f"{self}: no channel UUID in the first message: {data[:200]!r}")
         else:
             logger.debug(f"{self}: ignoring text message: {data[:200]!r}")
         return None
@@ -290,5 +295,6 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
                 value = json.loads(text).get("uuid")
             except (json.JSONDecodeError, AttributeError):
                 return None
-            return value if isinstance(value, str) and value else None
-        return text or None
+        else:
+            value = text
+        return value if isinstance(value, str) and is_valid_uuid(value) else None
