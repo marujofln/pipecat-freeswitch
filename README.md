@@ -25,6 +25,10 @@ taken from the bot's log.
 <!-- Drag demo.mp4 here in the GitHub editor: it becomes a https://github.com/user-attachments/assets/... link
      that plays inline. -->
 
+https://github.com/user-attachments/assets/f07c004c-b16f-4203-bdd6-7f4d1e39a260
+
+
+
 ## How it works
 
 ```
