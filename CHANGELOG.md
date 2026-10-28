@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `output_gain_db` (default 0): gain applied to bot audio before it is sent, clipped to 16 bits. TTS speech measured
+  about 12 dB above telephone level, with full-scale peaks, and distorted on a desk phone and a softphone.
 - `freeswitch_in_sample_rate` and `freeswitch_out_sample_rate`: separate stream rates per direction, e.g. 16 kHz
   caller audio and 48 kHz bot audio on Opus channels.
 - Bot audio at 48 kHz is sent as WAV (FreeSWITCH plays raw audio only at 8, 16, 24 and 32 kHz).
@@ -27,6 +29,10 @@ All notable changes to this project are documented here. The format follows
 - The example voice bot runs in Docker: `examples/bot.Dockerfile` and a `bot` service in the bench's compose file
   (profile `bot`, extension `9996`, keys from the repository's `.env`), so a softphone call reaches the full
   STT → LLM → TTS pipeline with one `docker compose` command. `.env.example` lists the variables.
+- `examples/bot.py` takes the caller and bot audio rates per call from the WebSocket URL (`?in_rate=16000&out_rate=48000`),
+  with 8 kHz both ways as the default, so one bot serves G.711 and Opus calls. The bench adds extension `9995`
+  (Opus: 16 kHz stream, 48 kHz bot audio) next to `9996` (G.711), and its softphone profile now accepts Opus as
+  well as PCMU and PCMA.
 - `examples/bot.py` checks the service keys at startup instead of failing in the first call, and reads `HOST`
   (default `0.0.0.0`) as well as `PORT`.
 - `examples/bot.py` can use OpenRouter for all three services, with one `OPENROUTER_API_KEY`: `LLM_PROVIDER=openrouter`
@@ -70,6 +76,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Barge-in by voice never worked with the example's 40 ms blocks.** Each FreeSWITCH `playback` sends an audio sync
+  that resets the jitter buffer and flushes the caller's incoming audio, costing 30–40 ms of caller audio per block:
+  with 40 ms blocks the bot heard nothing while it spoke (~100% lost, measured with a continuous-tone caller), so it
+  was only interrupted when a late transcription arrived. `examples/bot.py` now sends 200 ms blocks (`BLOCK_MS`; 14%
+  lost) and the README documents the trade-off. A growing-block chunker is planned.
+- `examples/bot.py` defaults to `OUTPUT_GAIN_DB=-12` (bot speech at −24.7 dBFS RMS, peaks −12.8 dBFS, instead of
+  −13 dBFS with full-scale peaks) and `VAD_MIN_VOLUME=0.4` (Pipecat's 0.6 missed quiet phone speech); `VAD_CONFIDENCE`
+  is configurable too.
+- Bench: the voice-bot extensions pass the channel's negotiated rate (`out_rate=${write_rate}`). Opus ran at 16 kHz on
+  a Grandstream GXV3275, and sending 48 kHz made FreeSWITCH resample every block, with a click at each seam.
 - Bot audio held while the channel UUID is unknown could grow without bound; only the last 5 s are kept now, with
   a warning. `FreeSWITCHControl.stop()` awaits the event task it cancels.
 - The version is written only in `pipecat_freeswitch.__version__`; `pyproject.toml` reads it from there.

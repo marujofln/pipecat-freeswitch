@@ -136,14 +136,16 @@ async def websocket_endpoint(websocket: WebSocket):
         esl_host="10.0.0.5",
         esl_port=8021,
         esl_password="ClueCon",
-        params=FreeSWITCHFrameSerializer.InputParams(freeswitch_sample_rate=8000),
+        params=FreeSWITCHFrameSerializer.InputParams(
+            freeswitch_sample_rate=8000, output_gain_db=-12  # TTS is far louder than phone level
+        ),
     )
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            audio_out_10ms_chunks=4,       # 40 ms per streamAudio block
+            audio_out_10ms_chunks=20,      # 200 ms blocks: shorter ones deafen barge-in
             audio_out_end_silence_secs=0,  # the serializer waits for playback before hanging up
             serializer=serializer,
         ),
@@ -174,6 +176,7 @@ the event socket is ready. Reading it yourself, as above, lets the serializer co
 | `freeswitch_in_sample_rate` | `freeswitch_sample_rate` | Caller audio rate, as given to `uuid_audio_stream` (`8k`, `16k`) |
 | `freeswitch_out_sample_rate` | `freeswitch_sample_rate` | Bot audio rate, the channel's: 8000, 16000, 24000, 32000 (raw) or 48000 (sent as WAV) |
 | `output_resampler_quality` | `"QQ"` | SOXR preset used only if bot audio must be resampled |
+| `output_gain_db` | `0.0` | Gain applied to bot audio, in dB (negative attenuates); see [Bot audio level](#bot-audio-level) |
 | `sample_rate` | `None` | Override for the pipeline input rate |
 | `auto_hang_up` | `True` | Hang up on `EndFrame` (after playback) and `CancelFrame` (at once) |
 | `hang_up_timeout_secs` | `30.0` | Maximum wait for queued audio on `EndFrame` |
@@ -206,9 +209,29 @@ rate). The simplest setup runs the pipeline output at that rate, so nothing is r
 ### Choosing the block size
 
 Each output chunk of the transport (`audio_out_10ms_chunks` × 10 ms) becomes one `streamAudio` message, one temporary
-file and one `playback` in FreeSWITCH. Smaller blocks cut latency; larger blocks cut per-file overhead. On the bench,
-40 ms and 200 ms blocks both played gaplessly at the channel rate, with first audio 50–150 ms after the bot queued it;
-FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks against 0.55–0.85 s with 200 ms blocks.
+file and one `playback` in FreeSWITCH. **Use 200 ms or more (`audio_out_10ms_chunks=20`), not 40 ms**, or the bot
+cannot hear the caller while it speaks:
+
+- **Every `playback` that starts deafens the channel for 30–40 ms.** FreeSWITCH's `playback` sends an audio sync when
+  it starts (`switch_ivr_play_file`), and on a SIP channel that resets the jitter buffer and flushes the caller's
+  incoming audio (`SWITCH_MESSAGE_INDICATE_AUDIO_SYNC` in `switch_core_media.c`). No setting turns it off. Measured on
+  the bench, with a caller sending a continuous tone while blocks play: **40 ms blocks lose ~100% of the caller's
+  audio** (the read side is flushed 25 times a second and never refills), 200 ms blocks 14–16%, 1 s blocks 4%; a
+  single long file loses nothing. With 40 ms blocks, barge-in by voice never worked, whatever the phone; with 200 ms
+  blocks it stopped the bot 5–6 ms after the caller spoke, on a desk phone and a softphone.
+- **Larger blocks cost first-audio latency**, since a block plays only once it is complete (about 160 ms more at
+  200 ms than at 40 ms), and save CPU: FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks against
+  0.55–0.85 s with 200 ms blocks. Both played gaplessly at the channel rate.
+- **Send the channel's real rate.** Opus may run at 48 or 16 kHz depending on the phone; if `freeswitch_out_sample_rate`
+  differs, FreeSWITCH resamples every block on its own and clicks at the seams. The bench's dialplan passes
+  `out_rate=${write_rate}` to the bot, which is the rate the channel actually negotiated.
+
+### Bot audio level
+
+TTS services deliver speech much louder than telephone level: on the bench, around −13 dBFS RMS with peaks at full
+scale, against about −26 dBFS for active speech on a phone line (ITU-T P.56). That loud, it distorted on a desk phone
+and a softphone. `output_gain_db` scales bot audio before it is sent (samples are clipped to 16 bits);
+`examples/bot.py` uses −12 dB, which measured −24.7 dBFS RMS with peaks at −12.8 dBFS.
 
 ### Known limitations
 
@@ -226,14 +249,15 @@ FreeSWITCH used about 1.0–1.3 s of CPU for a 3 s call with 40 ms blocks agains
   of the calls in progress stay behind. A periodic cleanup handles them, with an age above your longest call so it
   never touches a live one, e.g. `find /tmp -maxdepth 1 -name '*-*-*-*-*_*.tmp.*' -mmin +240 -delete`. The package
   cannot delete them itself: the files belong to FreeSWITCH, on its host.
-- **Barge-in depends on the caller's audio reaching the bot while it speaks.** Once Pipecat detects the caller (VAD or
-  transcription), the bot's audio stops within a few milliseconds: 3–11 ms from detection to the end of playback in
-  FreeSWITCH, measured on the bench, with the audio still in flight dropped. But a softphone on loudspeaker with echo
-  cancellation or an echo limiter (Linphone's defaults, for example) attenuates the caller's microphone while the
-  bot's voice plays. In a stereo recording of such a call, the caller's channel was silent every time the bot spoke,
-  and the VAD only caught the caller when they spoke loudly and steadily. Use a headset, or turn the softphone's echo
-  cancellation and echo limiter off (with loudspeakers, the bot may then interrupt itself on its own echo). Lowering
-  the VAD thresholds (`min_volume`, `confidence` in `VADParams`) catches attenuated speech, at the same risk.
+- **Barge-in needs blocks of 200 ms or more.** Each block's `playback` flushes 30–40 ms of the caller's incoming audio
+  (see [Choosing the block size](#choosing-the-block-size)), so while the bot speaks the caller is partly lost: 14–16%
+  with 200 ms blocks, nearly all of it with 40 ms. Once Pipecat detects the caller, the bot's audio stops within a few
+  milliseconds (3–11 ms in FreeSWITCH, with the audio still in flight dropped). A fix that keeps the first block
+  small and grows the following ones is planned.
+- **Phone audio is quiet for Pipecat's default VAD.** A caller speaking normally measured 0.66–0.70 on Pipecat's
+  volume scale, so the default `min_volume` of 0.6 misses speech that the flush above has already thinned out;
+  `examples/bot.py` uses 0.4. With a loudspeaker and no echo cancellation, raise it again, or the bot may interrupt
+  itself on its own echo.
 
 ## Example
 
@@ -294,8 +318,13 @@ set as in [FreeSWITCH setup](#freeswitch-setup). The bot refuses to start withou
 
 **Try it with a phone call, all in Docker:** the bench runs the bot as its `bot` service on extension `9996`. Copy
 `.env.example` to `.env` and fill in the keys, run `docker compose --profile bot up -d --build` in
-`examples/freeswitch`, register a softphone as `1000` / `1234` on port 5060, and dial `9996`. See
-[the bench README](examples/freeswitch/README.md#talking-to-the-voice-bot-9996).
+`examples/freeswitch`, register a softphone as `1000` / `1234` on port 5060, and dial `9996` (G.711) or `9995`
+(Opus). See [the bench README](examples/freeswitch/README.md#talking-to-the-voice-bot-9996).
+
+The bot defaults to 8 kHz both ways (G.711). A call can ask for other rates in the WebSocket URL, so one bot serves
+every codec: for Opus, the dialplan uses `ws://BOT_HOST:8765/ws?in_rate=16000&out_rate=48000` with `mono 16k`
+(in the dialplan XML, write the `&` as `&amp;`). `in_rate` must match the `uuid_audio_stream` rate (8000 or 16000)
+and `out_rate` should be the channel's codec rate; other values fall back to the defaults with a warning.
 
 ## Development
 

@@ -122,7 +122,27 @@ The original design had a `chunker.py` grouping output audio into blocks. It was
   `TTSStoppedFrame`, flushes the remainder padded with silence (`base_output.py`, `handle_tts_stopped`).
 
 So each `OutputAudioRawFrame` becomes one `streamAudio` message and the block size is the transport's
-`audio_out_10ms_chunks`. This also makes the pacing issue of PR pipecat-ai/pipecat#5593 moot: the serializer returns
+`audio_out_10ms_chunks`.
+
+**Revised on 2026-10-28: the block size has a hidden cost.** Every `playback` that starts sends an audio sync
+(`switch_channel_audio_sync` in `switch_ivr_play_file`), and on a SIP channel `SWITCH_MESSAGE_INDICATE_AUDIO_SYNC`
+resets the jitter buffer and flushes the caller's incoming audio (`switch_rtp_reset_jb` +
+`rtp_flush_read_buffer(..., SWITCH_RTP_FLUSH_ONCE)` in `switch_core_media.c`; skipped only for proxied media and T.38).
+Each block therefore deafens the channel for 30–40 ms, for every media bug on it (`mod_audio_stream`,
+`record_session`). Measured on the bench with a caller leg sending a continuous tone, no bot involved:
+
+| Bot audio played as | Caller audio lost while it plays |
+|---|---|
+| one 2 s file | 0% |
+| 40 ms blocks via `sendmsg` | ~100% (after ~0.5 s; the read side never refills) |
+| 200 ms blocks | 16% (14% with the real bot) |
+| 1 s blocks | 4% |
+
+With 40 ms blocks the bot never heard the caller while it spoke, so barge-in by voice never worked, on a softphone or
+a desk phone (it only worked when a late transcription arrived). The example bot now uses 200 ms blocks (`BLOCK_MS`).
+The proper fix is a chunker after all: a small first block for latency, then large blocks (~1 s), with the tail of
+each utterance flushed by the transport's trailing silence (`audio_out_end_silence_secs`), since nothing else calls
+the serializer at the end of an utterance. Not implemented yet. This also makes the pacing issue of PR pipecat-ai/pipecat#5593 moot: the serializer returns
 a payload for every audio frame.
 
 `FastAPIWebsocketTransport` paces output at **twice real time** (`_send_interval = chunk / rate / 2`). FreeSWITCH
@@ -138,7 +158,8 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
     # args: call_uuid (optional, canonical UUID), esl_host, esl_port, esl_password, params, control (optional)
     # params: freeswitch_sample_rate (8000), freeswitch_in_sample_rate (-> freeswitch_sample_rate),
     #   freeswitch_out_sample_rate (-> freeswitch_sample_rate; 8000/16000/24000/32000 raw, 48000 WAV),
-    #   output_resampler_quality ("QQ"), sample_rate, auto_hang_up (True), hang_up_timeout_secs (30)
+    #   output_resampler_quality ("QQ"), output_gain_db (0.0), sample_rate, auto_hang_up (True),
+    #   hang_up_timeout_secs (30)
     #   Rates are validated in the constructor.
 
     # setup(): connect the control if call_uuid is known (setup runs twice: input and output transport)
@@ -149,6 +170,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
     # serialize: Pipecat -> FreeSWITCH
     #   OutputAudioRawFrame  -> {"type":"streamAudio","data":{"audioDataType":"raw"|"wav","sampleRate":N,"audioData":b64}}
     #                           at freeswitch_out_sample_rate (resampled with SOXR "QQ" if the pipeline rate differs)
+    #                           and scaled by output_gain_db (clipped to 16 bits)
     #                           (held and merged into the next block until the control is ready)
     #   InterruptionFrame    -> control.interrupt(sent_messages): uuid_break all, drop stale files
     #   EndFrame             -> control.wait_for_playback() then uuid_kill (if auto_hang_up)
@@ -245,7 +267,11 @@ Points of attention:
   output rates are separate parameters (16 kHz caller audio for STT/VAD, 48 kHz bot audio on Opus).
   `freeswitch_out_sample_rate` defaults to `freeswitch_sample_rate` (8000), not to the pipeline rate: a 24 kHz TTS on
   a G.711 channel is resampled by the serializer (0 glitchy windows on the bench) instead of block by block by
-  FreeSWITCH (71 of 286). Opus channels set `freeswitch_out_sample_rate=48000`.
+  FreeSWITCH (71 of 286). The channel rate is the negotiated one, not the codec's nominal rate: Opus ran at 48 kHz
+  with Linphone and at 16 kHz with a Grandstream GXV3275 (`Set Codec ... opus/16000`), and sending 48 kHz to the
+  latter clicked at the seams. The dialplan passes `${write_rate}` to the bot (2026-10-28).
+- **Bot audio level (2026-10-28):** TTS speech arrived around −13 dBFS RMS with full-scale peaks, about 12 dB above
+  telephone level, and distorted on both phones; `output_gain_db` (−12 dB in the example) fixes it.
 - **ptime:** measurements used 20 ms. With another ptime the `uuid_broadcast` gap would change (5 × ptime); with
   `sendmsg` it should not matter, but check it in the harness with different codecs.
 

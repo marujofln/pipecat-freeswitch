@@ -26,7 +26,18 @@
       <condition field="destination_number" expression="^9996$">
         <action application="answer"/>
         <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
-        <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8767/ws mono 8k ${uuid})}"/>
+        <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8767/ws?out_rate=${write_rate} mono 8k ${uuid})}"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+    <!-- 9995: the same voice bot for wideband codecs: caller audio streamed at 16 kHz, bot audio at the
+         channel's own rate (${write_rate}: 48000 or 16000 for Opus, depending on the phone; 16000 for
+         G.722). Sending another rate makes FreeSWITCH resample every block, which clicks at each seam. -->
+    <extension name="pipecat_voice_bot_opus">
+      <condition field="destination_number" expression="^9995$">
+        <action application="answer"/>
+        <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
+        <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8767/ws?in_rate=16000&amp;out_rate=${write_rate} mono 16k ${uuid})}"/>
         <action application="park"/>
       </condition>
     </extension>

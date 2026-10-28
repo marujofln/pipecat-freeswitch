@@ -9,14 +9,15 @@ docker compose build        # first build compiles FreeSWITCH: ~15-30 min
 docker compose up
 ```
 
-Register a softphone as `1000` / `1234` against the host IP, port 5060 (codec PCMU or PCMA), and dial:
+Register a softphone as `1000` / `1234` against the host IP, port 5060 (codec Opus, PCMU or PCMA), and dial:
 
 | Extension | Served by | What you hear |
 |---|---|---|
 | `9999` | echo server (`bench/echo_server.py`, service `echo`) | your own voice, in 300 ms blocks |
 | `9998` | tone bot (`bench/tone_bot.py`, run it on the host) | a tone, then the bot hangs up |
 | `9997` | the same tone bot, caller audio at 16 kHz | the same, for wideband codecs (Opus) |
-| `9996` | the example voice bot (`examples/bot.py`, service `bot`) | a voice agent: Deepgram → OpenAI → Cartesia/ElevenLabs |
+| `9996` | the example voice bot (`examples/bot.py`, service `bot`), 8 kHz both ways | a voice agent (STT → LLM → TTS), for G.711 |
+| `9995` | the same voice bot, caller audio at 16 kHz and bot audio at the channel's rate (`${write_rate}`) | the same, for Opus or G.722: wideband speech for the STT and no resampling of the bot's voice |
 
 ### Talking to the voice bot (`9996`)
 
@@ -32,9 +33,9 @@ docker compose logs -f bot  # "Call <uuid> connected" when you dial 9996
 
 The bot listens on `127.0.0.1:8767` and uses the bench's token (`bench-token`, `bot_token` in `conf/vars.xml`). It
 refuses to start if a key is missing. Interrupt it while it speaks to see barge-in. **Use a headset:** on
-loudspeaker, a softphone's echo cancellation or echo limiter (on by default in Linphone) attenuates your microphone
-while the bot speaks, and the bot may not hear you interrupt it (see "Known limitations" in the
-[main README](../../README.md#known-limitations)). Speak English: the bot's prompt and speech-to-text default to it.
+loudspeaker the bot may hear its own voice and interrupt itself. If barge-in does not work, see "Choosing the block
+size" in the [main README](../../README.md#choosing-the-block-size): each block FreeSWITCH plays deafens the channel
+for 30–40 ms, so the bot uses 200 ms blocks. Speak English: the bot's prompt and speech-to-text default to it.
 
 The providers are picked in `.env` (`STT_PROVIDER`, `LLM_PROVIDER`, `TTS_PROVIDER`; see `.env.example` and the
 [main README](../../README.md#example)). For example, `LLM_PROVIDER=openrouter` with `OPENROUTER_API_KEY` replaces

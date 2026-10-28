@@ -47,9 +47,11 @@ Run with the extras of the providers you use (``openrouter`` covers all three Op
     LLM_PROVIDER=openrouter \
         uv run --with "pipecat-ai[websocket,deepgram,openrouter,cartesia,silero]" examples/bot.py
 
-Cartesia and ElevenLabs synthesize at the channel rate (OUTPUT_RATE below), so bot audio reaches
-FreeSWITCH without resampling. OpenRouter's text-to-speech runs the pipeline output at 24 kHz, and
-the serializer resamples it to the channel rate.
+Sample rates default to G.711 (8 kHz both ways). For Opus, point the dialplan at
+``ws://BOT_HOST:8765/ws?in_rate=16000&out_rate=48000`` with ``mono 16k``: caller audio then
+arrives at 16 kHz and bot audio leaves at the channel's 48 kHz. Cartesia and ElevenLabs synthesize
+at that output rate, so bot audio reaches FreeSWITCH without resampling; OpenRouter's voices come
+at 24 kHz and the serializer resamples them to it.
 """
 
 import os
@@ -60,6 +62,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -78,11 +81,15 @@ from pipecat_freeswitch import FreeSWITCHFrameSerializer
 
 load_dotenv(override=True)
 
+# Default rates, for G.711 (PCMU/PCMA). A call can ask for others in the WebSocket URL, e.g.
+# ws://BOT_HOST:8765/ws?in_rate=16000&out_rate=48000 for Opus (see rates_for_call below).
 # Caller audio: the rate given to uuid_audio_stream ("8k" -> 8000, "16k" -> 16000).
 STREAM_RATE = 8000
 # Bot audio: the channel's codec rate, so neither the serializer nor FreeSWITCH resamples it.
-# 8000 for PCMU/PCMA. For Opus use STREAM_RATE = 16000 ("16k") and OUTPUT_RATE = 48000.
 OUTPUT_RATE = 8000
+# Rates a call may ask for: Silero VAD takes 8 or 16 kHz, and FreeSWITCH plays these output rates.
+IN_RATES = (8000, 16000)
+OUT_RATES = (8000, 16000, 24000, 32000, 48000)
 
 STT_PROVIDER = os.getenv("STT_PROVIDER", "deepgram").lower()
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
@@ -95,8 +102,29 @@ OPENROUTER_TTS_RATE = 24000
 # A spoken answer is a few sentences. Without a cap, OpenRouter reserves credit for the model's
 # whole output limit (65536 tokens) on every request and refuses it when the balance is low.
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "300"))
-# Rate the TTS synthesizes at (the pipeline output rate); the serializer sends OUTPUT_RATE.
-TTS_RATE = OPENROUTER_TTS_RATE if TTS_PROVIDER == "openrouter" else OUTPUT_RATE
+
+# Voice activity detection. Phone audio arrives much quieter than a desktop microphone: on the
+# bench, a caller speaking normally measured 0.66-0.70 on Pipecat's volume scale (-44 to -40 LUFS),
+# and speaking over the bot only 0.48-0.63, so Pipecat's default min_volume of 0.6 (-50 LUFS) missed
+# most barge-ins. 0.4 (-70 LUFS, the BS.1770 gate below which Pipecat measures 0) only drops real
+# silence and leaves the speech decision to Silero's confidence. With a loudspeaker and no echo
+# cancellation, raise it again, or the bot may interrupt itself on its own echo.
+VAD_CONFIDENCE = float(os.getenv("VAD_CONFIDENCE", "0.7"))
+VAD_MIN_VOLUME = float(os.getenv("VAD_MIN_VOLUME", "0.4"))
+
+# Bot audio level. The TTS services deliver speech around -13 dBFS RMS with peaks at full scale
+# (measured on the bench with OpenRouter's ElevenLabs voice), about 12 dB above telephone level
+# (-26 dBFS active speech, ITU-T P.56). That loud, it distorted on a desk phone and a softphone, and
+# their echo suppression gated the caller's microphone while the bot spoke, defeating barge-in.
+OUTPUT_GAIN_DB = float(os.getenv("OUTPUT_GAIN_DB", "-12"))
+
+# Bot audio block size: each block is one streamAudio message, one file and one playback in
+# FreeSWITCH. Every playback that starts sends an audio sync, which on a SIP channel resets the
+# jitter buffer and flushes the caller's incoming audio: about 30-40 ms of caller audio is lost per
+# block. Measured on the bench while the bot speaks: 40 ms blocks lose ~100% of the caller (no
+# barge-in by voice at all), 200 ms blocks 16%, 1 s blocks 4%. Larger blocks cost first-audio
+# latency (a block plays only once it is complete).
+BLOCK_MS = int(os.getenv("BLOCK_MS", "200"))
 
 # Shared secret that FreeSWITCH sends in the Authorization header (STREAM_EXTRA_HEADERS).
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -265,19 +293,44 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     # mod_audio_stream sends the metadata (here, the channel UUID) before any audio.
     call_uuid = (await websocket.receive_text()).strip()
-    logger.info(f"Call {call_uuid} connected")
-    await run_bot(websocket, call_uuid)
+    in_rate, out_rate = rates_for_call(websocket)
+    logger.info(f"Call {call_uuid} connected (caller audio {in_rate} Hz, bot audio {out_rate} Hz)")
+    await run_bot(websocket, call_uuid, in_rate, out_rate)
 
 
-async def run_bot(websocket: WebSocket, call_uuid: str):
+def rates_for_call(websocket: WebSocket) -> tuple[int, int]:
+    """Caller and bot audio rates from the URL's ``in_rate``/``out_rate``, or the defaults.
+
+    The dialplan sets them per extension: ``in_rate`` must match the rate given to
+    ``uuid_audio_stream`` (``mono 16k`` -> 16000), and ``out_rate`` should be the channel's codec
+    rate (48000 for Opus). Values outside IN_RATES/OUT_RATES fall back to the defaults.
+    """
+
+    def pick(name: str, allowed: tuple[int, ...], default: int) -> int:
+        value = websocket.query_params.get(name, "")
+        if value.isdigit() and int(value) in allowed:
+            return int(value)
+        if value:
+            logger.warning(f"Ignoring {name}={value!r}; use one of {allowed}")
+        return default
+
+    return pick("in_rate", IN_RATES, STREAM_RATE), pick("out_rate", OUT_RATES, OUTPUT_RATE)
+
+
+async def run_bot(websocket: WebSocket, call_uuid: str, in_rate: int, out_rate: int):
     """Run the voice pipeline for one call."""
+    # Cartesia and ElevenLabs synthesize at the pipeline output rate, so it is the channel's.
+    # OpenRouter's voices come at 24 kHz; the serializer resamples them to the channel's rate.
+    tts_rate = OPENROUTER_TTS_RATE if TTS_PROVIDER == "openrouter" else out_rate
     serializer = FreeSWITCHFrameSerializer(
         call_uuid=call_uuid,
         esl_host=os.getenv("FREESWITCH_ESL_HOST", "127.0.0.1"),
         esl_port=int(os.getenv("FREESWITCH_ESL_PORT", "8021")),
         esl_password=os.getenv("FREESWITCH_ESL_PASSWORD", "ClueCon"),
         params=FreeSWITCHFrameSerializer.InputParams(
-            freeswitch_in_sample_rate=STREAM_RATE, freeswitch_out_sample_rate=OUTPUT_RATE
+            freeswitch_in_sample_rate=in_rate,
+            freeswitch_out_sample_rate=out_rate,
+            output_gain_db=OUTPUT_GAIN_DB,
         ),
     )
 
@@ -286,8 +339,8 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            # Each output chunk becomes one file played by FreeSWITCH: 4 x 10 ms = 40 ms blocks.
-            audio_out_10ms_chunks=4,
+            # Each output chunk becomes one file played by FreeSWITCH (see BLOCK_MS).
+            audio_out_10ms_chunks=BLOCK_MS // 10,
             # No trailing silence: the serializer already waits for playback before hanging up.
             audio_out_end_silence_secs=0,
             serializer=serializer,
@@ -310,7 +363,12 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
         ]
     )
     aggregators = LLMContextAggregatorPair(
-        context, user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer())
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(
+                params=VADParams(confidence=VAD_CONFIDENCE, min_volume=VAD_MIN_VOLUME)
+            )
+        ),
     )
 
     pipeline = Pipeline(
@@ -327,7 +385,7 @@ async def run_bot(websocket: WebSocket, call_uuid: str):
 
     worker = PipelineWorker(
         pipeline,
-        params=PipelineParams(audio_in_sample_rate=STREAM_RATE, audio_out_sample_rate=TTS_RATE),
+        params=PipelineParams(audio_in_sample_rate=in_rate, audio_out_sample_rate=tts_rate),
     )
 
     @transport.event_handler("on_client_connected")
