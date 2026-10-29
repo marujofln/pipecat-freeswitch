@@ -11,7 +11,7 @@ readme = "README.md"
 license = "BSD-2-Clause"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
-authors = [{ name = "Marcelo Araujo", email = "marujofln@gmail.com" }]
+authors = [{ name = "Marcelo Araujo", email = "devmarujo@gmail.com" }]
 keywords = ["pipecat", "freeswitch", "voice-ai", "telephony", "websocket", "voice-agent"]
 classifiers = [
     "Development Status :: 3 - Alpha",

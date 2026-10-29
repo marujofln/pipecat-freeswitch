@@ -11,7 +11,7 @@ Please read the guidelines below so collaboration stays efficient and pleasant f
 
 By participating in this project, you agree to follow our [Code of Conduct](CODE_OF_CONDUCT.md), adapted from the
 Contributor Covenant 2.1. Be respectful, welcoming and constructive; harassment is not tolerated. Report
-unacceptable behavior to the maintainer at marujofln@gmail.com.
+unacceptable behavior to the maintainer at devmarujo@gmail.com.
 
 ---
 

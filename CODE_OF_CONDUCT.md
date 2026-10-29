@@ -59,7 +59,7 @@ official social media account, or acting as an appointed representative at an on
 ## Enforcement and reporting
 
 Instances of abusive, harassing or otherwise unacceptable behavior may be reported to the project maintainer at
-**marujofln@gmail.com**. All complaints will be reviewed and investigated promptly and fairly.
+**devmarujo@gmail.com**. All complaints will be reviewed and investigated promptly and fairly.
 
 The project maintainers are obligated to respect the privacy and security of the reporter of any incident.
 
