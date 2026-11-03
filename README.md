@@ -395,8 +395,10 @@ The `bench` tests are deselected by default and skipped when the bench or the bo
 
 Bump `__version__` in `src/pipecat_freeswitch/__init__.py` (the only place the version is written), move the
 CHANGELOG's "Unreleased" entries under the new version, then tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
-The `Release` workflow checks that the tag matches the version, runs the tests, builds, and publishes to PyPI through
-trusted publishing (one-time setup on pypi.org: see the comment at the top of `.github/workflows/release.yml`).
+The `Release` workflow checks that the tag matches the version and that CHANGELOG.md has a section for it, runs the
+tests, builds, and publishes to PyPI through trusted publishing (one-time setup on pypi.org: see the comment at the
+top of `.github/workflows/release.yml`). It then creates the GitHub release, with that CHANGELOG section as notes and
+the wheel and sdist attached.
 
 The bench README documents the phase 0 measurements that shaped the design: why playback uses `sendmsg`, why
 `uuid_break` needs `all`, and why hang-up waits for playback.
