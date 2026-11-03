@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Call control over the FreeSWITCH event socket: playback, barge-in and hang-up."""
+"""Call control over the FreeSWITCH event socket: playback, barge-in, hang-up and DTMF."""
 
 import asyncio
 import contextlib
@@ -18,7 +18,11 @@ from pipecat_freeswitch.esl import ESLConnection, ESLError
 # mod_audio_stream names the file of the n-th streamAudio message <temp>/<uuid>_<n>.tmp.<ext>.
 _FILE_INDEX = re.compile(r"_(\d+)\.tmp\.[^./]+$")
 
-_EVENTS = "CHANNEL_EXECUTE_COMPLETE CHANNEL_HANGUP_COMPLETE CUSTOM mod_audio_stream::play"
+_EVENTS = "CHANNEL_EXECUTE_COMPLETE CHANNEL_HANGUP_COMPLETE DTMF CUSTOM mod_audio_stream::play"
+
+# Digits a DTMF event can carry (RFC 4733 also defines A-D). The digit goes into an event socket
+# command, so nothing else is let through.
+_DTMF_DIGITS = frozenset("0123456789*#ABCD")
 
 # The channel UUID goes into event socket commands, where a newline would start another command.
 _UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
@@ -49,6 +53,11 @@ class FreeSWITCHControl:
     channel and queues ``playback`` of each file with ESL ``sendmsg``, which
     (unlike ``uuid_broadcast``) adds no silence between files. It also
     interrupts playback and hangs up the call.
+
+    DTMF digits pressed on the channel arrive as event socket events, out of
+    reach of the WebSocket transport. They are forwarded to the WebSocket with
+    ``uuid_audio_stream <uuid> send_text``, as ``{"event":"dtmf","digit":"5"}``,
+    so they reach the pipeline through the transport like the caller audio.
 
     Files are numbered by mod_audio_stream in the order the messages were
     sent. After an interruption, files from messages sent before it are
@@ -217,6 +226,8 @@ class FreeSWITCHControl:
                     async with self._changed:
                         self._pending.discard(event.get("Application-Data", ""))
                         self._changed.notify_all()
+                elif name == "DTMF":
+                    await self._forward_dtmf(event)
                 elif name == "CHANNEL_HANGUP_COMPLETE":
                     async with self._changed:
                         self._channel_gone = True
@@ -267,6 +278,20 @@ class FreeSWITCHControl:
         async with self._changed:
             self._last_index = max(self._last_index, index)
             self._changed.notify_all()
+
+    async def _forward_dtmf(self, event: dict[str, str]):
+        digit = event.get("DTMF-Digit", "").upper()
+        if digit not in _DTMF_DIGITS:
+            logger.warning(f"{self}: ignoring DTMF event with digit {digit!r}")
+            return
+        # mod_audio_stream splits its API arguments on spaces, so the text must have none.
+        text = json.dumps({"event": "dtmf", "digit": digit}, separators=(",", ":"))
+        assert self._conn is not None
+        result = await self._conn.api(f"uuid_audio_stream {self._uuid} send_text {text}")
+        if result.startswith("+OK"):
+            logger.debug(f"{self}: forwarded DTMF {digit}")
+        else:
+            logger.error(f"{self}: could not forward DTMF {digit}: {result}")
 
     def _warn_if_default_password(self):
         global _warned_default_password

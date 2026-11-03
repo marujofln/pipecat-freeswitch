@@ -80,3 +80,8 @@ def test_interruption_stops_the_audio_for_good(results):
     assert not interrupt["audio_resumed"]
     assert interrupt["playbacks_started_after_interrupt"] == 0
     assert interrupt["heard_after_interrupt_ms"] < 100
+
+
+def test_caller_keys_reach_the_pipeline(results):
+    dtmf = results["dtmf"]
+    assert dtmf["received"] == dtmf["sent"]

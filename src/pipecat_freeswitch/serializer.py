@@ -10,6 +10,7 @@ import base64
 import json
 
 from loguru import logger
+from pipecat.audio.dtmf.types import KeypadEntry
 from pipecat.audio.resamplers.base_audio_resampler import SoxrQuality
 from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
 from pipecat.audio.utils import create_stream_resampler, pcm_to_wav, scale_audio
@@ -19,6 +20,7 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     InputAudioRawFrame,
+    InputDTMFFrame,
     InterruptionFrame,
 )
 from pipecat.processors.frame_processor import FrameProcessorSetup
@@ -58,7 +60,8 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
     queues each file for playback, stops playback on interruption
     (``uuid_break all``) and, when auto_hang_up is enabled, hangs up on
     ``EndFrame`` once the queued audio has finished playing, or right away on
-    ``CancelFrame``.
+    ``CancelFrame``. DTMF digits pressed by the caller are forwarded by the
+    control to the WebSocket and become ``InputDTMFFrame``.
 
     The channel UUID is the last argument of ``uuid_audio_stream ... start``
     and arrives as the first text message. Pass it as ``call_uuid`` when the
@@ -272,13 +275,16 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         metadata given to ``uuid_audio_stream``: the channel UUID, either as
         plain text or as a JSON object with a ``uuid`` field. Anything that is
         not a canonical UUID is rejected, since the UUID goes into event socket
-        commands and any WebSocket client can send this message.
+        commands and any WebSocket client can send this message. Later text
+        messages are DTMF digits forwarded by the control,
+        ``{"event":"dtmf","digit":"5"}``.
 
         Args:
             data: The raw WebSocket data from FreeSWITCH.
 
         Returns:
-            An InputAudioRawFrame for caller audio, or None otherwise.
+            An InputAudioRawFrame for caller audio, an InputDTMFFrame for a
+            DTMF digit, or None otherwise.
         """
         if isinstance(data, bytes):
             audio = await self._input_resampler.resample(
@@ -295,7 +301,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             else:
                 logger.error(f"{self}: no channel UUID in the first message: {data[:200]!r}")
         else:
-            logger.debug(f"{self}: ignoring text message: {data[:200]!r}")
+            return self._parse_dtmf(data)
         return None
 
     async def cleanup(self):
@@ -322,6 +328,22 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
                 )
             await self._control.hang_up()
         await self._control.stop()
+
+    def _parse_dtmf(self, text: str) -> InputDTMFFrame | None:
+        try:
+            message = json.loads(text)
+        except json.JSONDecodeError:
+            message = None
+        if not isinstance(message, dict) or message.get("event") != "dtmf":
+            logger.debug(f"{self}: ignoring text message: {text[:200]!r}")
+            return None
+        digit = message.get("digit")
+        try:
+            return InputDTMFFrame(KeypadEntry(digit))
+        except ValueError:
+            # A-D exist in RFC 4733 but not on phone keypads, nor in KeypadEntry.
+            logger.debug(f"{self}: ignoring DTMF digit {digit!r}")
+            return None
 
     @staticmethod
     def _parse_uuid(text: str) -> str | None:

@@ -15,6 +15,7 @@ from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
     InputAudioRawFrame,
+    InputDTMFFrame,
     InterruptionFrame,
     OutputAudioRawFrame,
     OutputTransportMessageFrame,
@@ -514,3 +515,40 @@ async def test_control_can_be_injected(esl_server):
     assert control.started and control.uuid == UUID
     await serializer.serialize(CancelFrame())
     assert not control.started
+
+
+@pytest.mark.parametrize("digit", list("0123456789*#"))
+async def test_dtmf_message_becomes_input_dtmf_frame(esl_server, digit):
+    serializer = make_serializer(esl_server, call_uuid=None)
+    await serializer.setup(SETUP)
+    await serializer.deserialize(UUID)
+    frame = await serializer.deserialize(json.dumps({"event": "dtmf", "digit": digit}))
+    assert isinstance(frame, InputDTMFFrame) and frame.button.value == digit
+    await serializer.serialize(CancelFrame())
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        '{"event":"dtmf","digit":"A"}',  # RFC 4733 digit with no KeypadEntry
+        '{"event":"dtmf","digit":"55"}',
+        '{"event":"dtmf"}',
+        '{"event":"dtmf","digit":5}',
+        '["dtmf", "5"]',
+        "5",
+        "not json",
+    ],
+)
+async def test_unusable_dtmf_message_is_ignored(esl_server, message):
+    serializer = make_serializer(esl_server)
+    await serializer.setup(SETUP)
+    assert await serializer.deserialize(message) is None
+    await serializer.serialize(CancelFrame())
+
+
+async def test_dtmf_message_does_not_replace_the_channel_uuid(esl_server):
+    # Before the UUID, a text message is the UUID: a DTMF message there is rejected, not a key.
+    serializer = make_serializer(esl_server, call_uuid=None)
+    await serializer.setup(SETUP)
+    assert await serializer.deserialize('{"event":"dtmf","digit":"5"}') is None
+    assert serializer.call_uuid is None

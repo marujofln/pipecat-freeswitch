@@ -155,3 +155,44 @@ async def test_playback_of_other_applications_is_ignored(esl_server, control):
     assert not await control.wait_for_playback(1, timeout=0.2)
     await esl_server.emit_playback_complete(UUID, 0)
     assert await control.wait_for_playback(1, timeout=1)
+
+
+def send_texts(esl_server) -> list[str]:
+    return [c for c in esl_server.commands if c.startswith("api uuid_audio_stream")]
+
+
+async def test_subscribes_to_dtmf(esl_server, control):
+    await started(control)
+    assert "DTMF" in (await esl_server.wait_for_command("event")).split()
+
+
+@pytest.mark.parametrize("digit", ["0", "5", "9", "*", "#", "A", "d"])
+async def test_dtmf_is_forwarded_to_the_websocket(esl_server, control, digit):
+    await started(control)
+    await esl_server.emit_dtmf(UUID, digit)
+    command = await esl_server.wait_for_command("api uuid_audio_stream")
+    # No spaces: mod_audio_stream splits its API arguments on them.
+    assert command == (
+        f'api uuid_audio_stream {UUID} send_text {{"event":"dtmf","digit":"{digit.upper()}"}}'
+    )
+
+
+@pytest.mark.parametrize("digit", ["", "12", "E", "5\napi system id", "5 x", "'", '"'])
+async def test_unexpected_dtmf_digit_is_not_forwarded(esl_server, control, digit):
+    # The digit goes into an event socket command: anything but one key must stay out of it.
+    await started(control)
+    await esl_server.emit_dtmf(UUID, digit)
+    await esl_server.emit_dtmf(UUID, "1")
+    await esl_server.wait_for_command("api uuid_audio_stream")
+    assert send_texts(esl_server) == [
+        f'api uuid_audio_stream {UUID} send_text {{"event":"dtmf","digit":"1"}}'
+    ]
+
+
+async def test_failed_dtmf_forward_does_not_stop_the_control(esl_server, control):
+    esl_server.errors["api uuid_audio_stream"] = "-ERR Operation Failed"
+    await started(control)
+    await esl_server.emit_dtmf(UUID, "1")
+    await esl_server.wait_for_command("api uuid_audio_stream")
+    await esl_server.emit_play(UUID, 0)
+    await esl_server.wait_for_command("sendmsg")

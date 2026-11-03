@@ -7,6 +7,8 @@ counts the caller audio it receives and plays a tone, then, depending on the sce
 - ``speak_end``: queue ``EndFrame`` right after the tone (the serializer must let it finish, then hang up).
 - ``interrupt``: push an interruption ``interrupt_after_s`` after the tone starts (playback must stop
   at once and stay stopped), then end the call.
+- ``dtmf``: play nothing and end the call after ``tone_seconds``; every ``InputDTMFFrame`` reaching the
+  pipeline is logged, so the keys pressed on the caller leg can be checked.
 
 Connections without ``Authorization: Bearer $BOT_TOKEN`` (default ``bench-token``, the ``bot_token`` of the
 bench's vars.xml) are refused during the handshake.
@@ -29,6 +31,7 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     InputAudioRawFrame,
+    InputDTMFFrame,
     InterruptionWorkerFrame,
     OutputAudioRawFrame,
 )
@@ -87,19 +90,22 @@ def tone_frames(seconds: float, rate: int) -> list[OutputAudioRawFrame]:
 
 
 class InputCounter(FrameProcessor):
-    """Counts caller audio frames reaching the pipeline."""
+    """Counts caller audio frames reaching the pipeline and logs DTMF keys."""
 
-    def __init__(self):
+    def __init__(self, uuid: str):
         super().__init__()
+        self.uuid = uuid
         self.frames = 0
         self.bytes = 0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        """Count caller audio and pass every frame on."""
+        """Count caller audio, log DTMF keys and pass every frame on."""
         await super().process_frame(frame, direction)
         if isinstance(frame, InputAudioRawFrame):
             self.frames += 1
             self.bytes += len(frame.audio)
+        elif isinstance(frame, InputDTMFFrame):
+            log_event(self.uuid, "dtmf", digit=frame.button.value)
         await self.push_frame(frame, direction)
 
 
@@ -143,7 +149,7 @@ async def ws_endpoint(websocket: WebSocket):
             serializer=serializer,
         ),
     )
-    counter = InputCounter()
+    counter = InputCounter(uuid)
     worker = PipelineWorker(
         Pipeline([transport.input(), counter, transport.output()]),
         params=PipelineParams(audio_in_sample_rate=scenario.in_rate, audio_out_sample_rate=scenario.pipeline_out_rate),
@@ -151,6 +157,11 @@ async def ws_endpoint(websocket: WebSocket):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
+        if scenario.scenario == "dtmf":
+            await asyncio.sleep(scenario.tone_seconds)
+            log_event(uuid, "end_queued")
+            await worker.queue_frame(EndFrame())
+            return
         frames = tone_frames(scenario.tone_seconds, scenario.pipeline_out_rate)
         log_event(uuid, "tone_queued", seconds=scenario.tone_seconds, frames=len(frames))
         if scenario.scenario == "speak_end":

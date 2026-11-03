@@ -25,6 +25,7 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     InputAudioRawFrame,
+    InputDTMFFrame,
     InterruptionWorkerFrame,
     OutputAudioRawFrame,
 )
@@ -48,18 +49,23 @@ OnConnected = Callable[[PipelineWorker], Awaitable[None]]
 
 
 class Recorder(FrameProcessor):
-    """Counts the caller audio that reaches the pipeline."""
+    """Counts the caller audio and records the DTMF keys that reach the pipeline."""
 
     def __init__(self):
         super().__init__()
         self.audio_bytes = 0
         self.sample_rates: set[int] = set()
+        self.keys = ""
+        self.keys_changed = asyncio.Event()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, InputAudioRawFrame):
             self.audio_bytes += len(frame.audio)
             self.sample_rates.add(frame.sample_rate)
+        elif isinstance(frame, InputDTMFFrame):
+            self.keys += frame.button.value
+            self.keys_changed.set()
         await self.push_frame(frame, direction)
 
 
@@ -234,4 +240,23 @@ async def test_interruption_stops_playback_and_the_call_still_ends(esl_server, s
     assert 0 < audio_bytes(messages) < 3 * 16000
     # Playback that never completes was flushed by uuid_break, so the hang-up does not wait for it.
     await esl_server.wait_for_command(f"api uuid_kill {UUID}")
+    await esl_server.wait_until_all_closed()
+
+
+async def test_caller_keys_reach_the_pipeline(esl_server, serve):
+    recorder = Recorder()
+    port = await serve(bot_app(esl_server.port, recorder))
+
+    async with connect(f"ws://127.0.0.1:{port}/ws") as ws:
+        # Like mod_audio_stream, the fake event socket sends send_text's text on the WebSocket.
+        esl_server.send_text = ws.send
+        await ws.send(UUID)
+        await esl_server.wait_for_command("event")  # the control follows the channel
+        for digit in "12*#":
+            await esl_server.emit_dtmf(UUID, digit)
+            await ws.send(b"\x00\x00" * (STREAM_RATE // 50))  # caller audio keeps flowing
+        async with asyncio.timeout(5):
+            while recorder.keys != "12*#":
+                recorder.keys_changed.clear()
+                await recorder.keys_changed.wait()
     await esl_server.wait_until_all_closed()

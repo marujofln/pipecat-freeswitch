@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- DTMF: keys pressed by the caller (0–9, `*`, `#`) become `InputDTMFFrame`. `FreeSWITCHControl` subscribes to the
+  channel's `DTMF` events and forwards each key to the WebSocket with `uuid_audio_stream <uuid> send_text`, where
+  the serializer reads it. Keys A–D are ignored, and only single valid keys are put into event socket commands.
+- `examples/bot.py` passes keypad input to the LLM through Pipecat's `DTMFAggregator`.
+- Bench scenario `dtmf` in `bench/run_e2e.py`: the caller leg presses every key over a SIP call and the bot must
+  receive them all, in order.
+
 ## [0.1.0] - 2026-10-28
 
 First public release.

@@ -5,13 +5,13 @@ Community integration that connects [Pipecat](https://github.com/pipecat-ai/pipe
 [`mod_audio_stream`](https://github.com/amigniter/mod_audio_stream) WebSocket module.
 
 `FreeSWITCHFrameSerializer` plugs into Pipecat's `FastAPIWebsocketTransport`: caller audio flows into the pipeline,
-bot audio is played on the call, and barge-in and hang-up work.
+bot audio is played on the call, and barge-in, hang-up and keypad input (DTMF) work.
 
 This is an independent community project, not affiliated with SignalWire (FreeSWITCH), Daily (Pipecat) or the
 mod_audio_stream authors.
 
 > **Status: v0.1.0, alpha.** Tested end to end against FreeSWITCH 1.11.3 with a Pipecat pipeline (tone playback,
-> hang-up after speech, interruption), with unit and integration tests, and with calls from a softphone (Linphone)
+> hang-up after speech, interruption, DTMF), with unit and integration tests, and with calls from a softphone (Linphone)
 > and a desk phone (Grandstream) to the full STT → LLM → TTS example (all three on OpenRouter), barge-in included.
 > Deepgram, OpenAI, Cartesia and ElevenLabs direct have not been run against their live APIs yet.
 
@@ -45,6 +45,8 @@ Caller ──SIP/RTP──> FreeSWITCH ──(mod_audio_stream, WebSocket)──
   flight from before the interruption is dropped.
 - **Hang-up**: on `EndFrame`, the serializer waits until the queued audio has finished playing, then runs
   `uuid_kill`; on `CancelFrame` it hangs up at once.
+- **DTMF**: the control receives the channel's `DTMF` events and forwards each key to the WebSocket with
+  `uuid_audio_stream <uuid> send_text`; the serializer turns it into `InputDTMFFrame`. See [DTMF](#dtmf).
 - **Channel UUID**: the last argument of `uuid_audio_stream ... start`, delivered as the first WebSocket message.
 
 ## Installation
@@ -245,9 +247,24 @@ scale, against about −26 dBFS for active speech on a phone line (ITU-T P.56). 
 and a softphone. `output_gain_db` scales bot audio before it is sent (samples are clipped to 16 bits);
 `examples/bot.py` uses −12 dB, which measured −24.7 dBFS RMS with peaks at −12.8 dBFS.
 
+### DTMF
+
+Keys pressed by the caller become `InputDTMFFrame` in the pipeline: 0–9, `*` and `#`. FreeSWITCH reports each key
+as a `DTMF` event on the event socket, which the WebSocket transport cannot see, so `FreeSWITCHControl` forwards it
+to the call's WebSocket with `uuid_audio_stream <uuid> send_text {"event":"dtmf","digit":"5"}`, and the serializer
+reads it like any other incoming message. Nothing needs to be configured for keys sent as RFC 2833 telephone events
+or SIP INFO, which most phones and carriers use. Keys sent as in-band tones are only detected if the dialplan runs
+`start_dtmf` before `uuid_audio_stream`. Keys A–D have no `KeypadEntry` and are ignored.
+
+To hand keys to the LLM, put Pipecat's `DTMFAggregator` after the STT service, as
+[`examples/bot.py`](examples/bot.py) does: it collects keys until `#` or 2 s of silence and passes them on as a
+`DTMF: 123#` transcription.
+
+On the bench, all twelve keys sent as RFC 2833 events over a SIP call reached the pipeline in order
+(`bench/run_e2e.py --scenarios dtmf`).
+
 ### Known limitations
 
-- No DTMF yet (planned for v0.2).
 - Pipecat's WebSocket transport sends audio about twice as fast as real time, so FreeSWITCH queues ahead of playback
   and `BotStoppedSpeakingFrame` can arrive before the caller has heard the end of the speech.
 - The serializer relies on mod_audio_stream naming files `<uuid>_<n>.tmp.<ext>` in send order to drop stale audio

@@ -78,6 +78,27 @@ The first WebSocket message names the channel the serializer controls, and that 
 - The bench applies the same rules: `bench/tone_bot.py` requires the token (`bench-token`), and
   `bench/echo_server.py` listens on `127.0.0.1` and rejects non-canonical UUIDs.
 
+### DTMF (2026-11-03)
+
+FreeSWITCH reports each key as a `DTMF` event (`DTMF-Digit`) on the channel, which only the event socket sees. The
+serializer can only hand frames to the pipeline from `deserialize()`, which the transport calls for WebSocket
+messages, so the key has to come in through the WebSocket:
+
+- `FreeSWITCHControl` subscribes to `DTMF` with the other events and, for each key, runs
+  `api uuid_audio_stream <uuid> send_text {"event":"dtmf","digit":"5"}`. mod_audio_stream (`da8b068`) sends that
+  text on the call's WebSocket as a text message. It splits API arguments on spaces with `switch_separate_string`,
+  which strips single quotes and backslash escapes but keeps double quotes, so the JSON is written without spaces.
+- The digit goes into an event socket command: only one character of `0-9*#A-D` is forwarded, anything else is
+  logged and dropped.
+- `deserialize()` turns `{"event":"dtmf","digit":...}` text messages (after the channel UUID) into
+  `InputDTMFFrame`. A–D have no `KeypadEntry` and are dropped.
+- Alternatives rejected: a dialplan `bind_digit_action` still needs a way into the pipeline, and returning queued
+  keys from the next audio `deserialize()` call would drop or delay caller audio.
+- The WebSocket client could send the same message itself. It is already authenticated by the bearer token and owns
+  the call's audio, so this grants nothing new.
+- Bench: `uuid_send_dtmf` on the SIP caller leg (RFC 2833) delivered `1234567890*#` in order to the bot's pipeline.
+  In-band tones need `start_dtmf` in the dialplan (not tested).
+
 ## Repository layout
 
 ```
@@ -303,7 +324,9 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
   `cleanup()`, error-path and in-process integration tests, explicit sdist contents). Listed on 2026-10-28: 0.1.0 on
   PyPI, demo video in the README, Discord post; the Pipecat docs PR (pipecat-ai/docs#1611) was merged on
   2026-10-30.
-- **v0.2:** DTMF (ESL or a dialplan bind), adapters for `mod_audio_fork` and `mod_earshot`'s native protocol.
+- **v0.2:** DTMF (implemented on 2026-11-03, see [DTMF](#dtmf-2026-11-03)). The other candidates were left out of
+  this release: adapters for `mod_audio_fork` and `mod_earshot`'s native protocol, outbound ESL, and a per-call
+  token.
 - **v0.3:** a growing-block chunker (small first block, then ~1 s blocks) and latency metrics (time to first audio
   per block size).
 
@@ -317,7 +340,7 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
 - [x] CHANGELOG
 - [x] PyPI release (0.1.0, 2026-10-28)
 - [x] Hang-up through the native API (ESL)
-- [ ] DTMF → `InputDTMFFrame` (v0.2)
+- [x] DTMF → `InputDTMFFrame` (v0.2)
 - [x] Fork of pipecat-ai/docs: row in `supported-services.mdx`, page `serializers/freeswitch.mdx`, `docs.json`
   (pipecat-ai/docs#1611, merged on 2026-10-30)
 - [x] 30–60 s video showing it working + an interruption (README, Demo section)

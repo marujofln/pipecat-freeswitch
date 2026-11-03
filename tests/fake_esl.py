@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from urllib.parse import quote
 
 
@@ -23,7 +24,9 @@ class FakeESLServer:
     text to reply with, and a command starting with ``drop_on`` closes the
     connection instead of being answered. With ``auto_complete_playback``,
     every ``sendmsg`` is followed by the ``CHANNEL_EXECUTE_COMPLETE`` of its
-    playback, as if the file had played at once.
+    playback, as if the file had played at once. With ``send_text``, the text
+    of every ``uuid_audio_stream <uuid> send_text <text>`` is passed to it, as
+    mod_audio_stream sends it on the call's WebSocket.
     """
 
     def __init__(self, password: str = "ClueCon"):
@@ -34,6 +37,7 @@ class FakeESLServer:
         self.errors: dict[str, str] = {}
         self.drop_on: str | None = None
         self.auto_complete_playback = False
+        self.send_text: Callable[[str], Awaitable[None]] | None = None
         # Client connections currently open, to catch leaked connections.
         self.open_connections = 0
         self._server: asyncio.base_events.Server | None = None
@@ -104,6 +108,18 @@ class FakeESLServer:
             }
         )
 
+    async def emit_dtmf(self, uuid: str, digit: str):
+        """Emit the DTMF event of one key press."""
+        await self.emit(
+            {
+                "Event-Name": "DTMF",
+                "Unique-ID": uuid,
+                "DTMF-Digit": digit,
+                "DTMF-Duration": "1600",
+                "DTMF-Source": "RTP",
+            }
+        )
+
     async def emit_hangup(self, uuid: str):
         """Emit CHANNEL_HANGUP_COMPLETE."""
         await self.emit({"Event-Name": "CHANNEL_HANGUP_COMPLETE", "Unique-ID": uuid})
@@ -142,6 +158,10 @@ class FakeESLServer:
                     break
                 error = next((e for p, e in self.errors.items() if command.startswith(p)), None)
                 reply = error or "+OK"
+                args = command.split(" ", 4)
+                if self.send_text and not error and args[1:2] == ["uuid_audio_stream"]:
+                    if args[3:4] == ["send_text"]:
+                        await self.send_text(args[4])
                 if command.startswith("api "):
                     body = f"{reply}\n"
                     header = f"Content-Type: api/response\nContent-Length: {len(body)}\n\n"

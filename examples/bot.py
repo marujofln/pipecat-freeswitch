@@ -19,9 +19,10 @@ can reach it could send another call's UUID and interrupt or hang up that call. 
 set in vars.xml (``<X-PRE-PROCESS cmd="set" data="bot_token=..."/>``). Use ``wss://`` or a private
 network, since over plain ``ws://`` the token travels in clear text.
 
-The bot also needs the FreeSWITCH event socket (mod_event_socket) to play audio, barge in and
-hang up. Environment: BOT_TOKEN, the keys of the services below, and optionally
-FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD, HOST (0.0.0.0) and PORT (8765).
+The bot also needs the FreeSWITCH event socket (mod_event_socket) to play audio, barge in,
+hang up and receive keypad presses (DTMF). Environment: BOT_TOKEN, the keys of the services
+below, and optionally FREESWITCH_ESL_HOST, FREESWITCH_ESL_PORT, FREESWITCH_ESL_PASSWORD, HOST
+(0.0.0.0) and PORT (8765).
 
 Services, each chosen with an environment variable (keys in parentheses):
 
@@ -66,6 +67,7 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.processors.aggregators.dtmf_aggregator import DTMFAggregator
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
@@ -357,7 +359,8 @@ async def run_bot(websocket: WebSocket, call_uuid: str, in_rate: int, out_rate: 
                 "role": "system",
                 "content": (
                     "You are a helpful assistant on a phone call. Keep answers short and "
-                    "conversational; your output is spoken, so avoid lists and formatting."
+                    "conversational; your output is spoken, so avoid lists and formatting. "
+                    "Keys the caller presses on the phone keypad reach you as 'DTMF: <keys>'."
                 ),
             }
         ]
@@ -375,6 +378,7 @@ async def run_bot(websocket: WebSocket, call_uuid: str, in_rate: int, out_rate: 
         [
             transport.input(),
             stt,
+            DTMFAggregator(),  # keypad presses -> "DTMF: 123#" for the LLM
             aggregators.user(),
             llm,
             tts,

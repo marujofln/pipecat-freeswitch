@@ -7,6 +7,8 @@ serializer), and checks what the caller hears:
   hang-up to come only after it.
 - ``interrupt``: the bot is interrupted while the tone plays. Expect the audio to stop at once and not
   resume.
+- ``dtmf``: the caller leg presses every keypad key (RFC 2833 over the SIP call). Expect the bot's
+  pipeline to receive the same keys as ``InputDTMFFrame``, in order.
 - ``auth``: WebSocket handshakes to the bot without the bearer token, or with a wrong one. Expect both
   to be refused (HTTP 403). The calls of the other scenarios carry the right token, set in the
   dialplan with ``STREAM_EXTRA_HEADERS``, so they show it is accepted.
@@ -218,6 +220,29 @@ async def run_interrupt(bench: Bench, tone_seconds: float, after_s: float, chunk
     }
 
 
+DTMF_KEYS = "1234567890*#"
+
+
+async def run_dtmf(bench: Bench, rates: dict) -> dict:
+    """The caller presses every key; the bot's pipeline must receive them all, in order."""
+    call = await bench.place_call("bot", 40, 6.0, scenario="dtmf", audio_out_10ms_chunks=4, **rates)
+    await asyncio.sleep(1.0)  # let the bot's control follow the channel
+    sent_at = time.time()
+    await bench.conn.api(f"uuid_send_dtmf {call.caller_uuid} {DTMF_KEYS}")
+    await wait_for_hangup(bench, call.leg_uuid, 15)
+    await bench.hang_up(call)
+    keys = [e for e in bot_log(bench, call.leg_uuid) if e["kind"] == "dtmf"]
+    return {
+        "scenario": "dtmf",
+        "codec": bench.codec,
+        **rates,
+        "leg_uuid": call.leg_uuid,
+        "sent": DTMF_KEYS,
+        "received": "".join(e["digit"] for e in keys),
+        "send_to_last_key_ms": ms(keys[-1]["wall"] - sent_at) if keys else None,
+    }
+
+
 async def main():
     """Run both scenarios and print the results."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -227,7 +252,7 @@ async def main():
     parser.add_argument("--in-rate", type=int, default=8000, choices=sorted(EXTENSIONS))
     parser.add_argument("--out-rates", default="8000", help="freeswitch_out_sample_rate values to compare")
     parser.add_argument("--pipeline-out-rate", type=int, default=24000, help="pipeline (TTS) output rate")
-    parser.add_argument("--scenarios", default="auth,speak_end,interrupt")
+    parser.add_argument("--scenarios", default="auth,speak_end,interrupt,dtmf")
     args = parser.parse_args()
 
     conn = await EslConnection.connect("127.0.0.1", 8021, "ClueCon")
@@ -254,6 +279,10 @@ async def main():
                 "out_rate": out_rate,
                 "pipeline_out_rate": args.pipeline_out_rate,
             }
+            if "dtmf" in scenarios:
+                result = await run_dtmf(bench, rates)
+                results.append(result)
+                print(json.dumps(result), flush=True)
             for chunks in (int(c) for c in args.chunks.split(",")):
                 if "speak_end" in scenarios:
                     result = await run_speak_end(bench, args.tone_seconds, chunks, rates)
