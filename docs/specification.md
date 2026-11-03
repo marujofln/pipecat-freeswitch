@@ -300,8 +300,9 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
   `uuid_break` with and without `all`, `uuid_kill`, real-time pacing, hang-up after speech.
 - **v0.1 (implemented on 2026-10-27):** serializer + control (ESL), `bot.py` example, README, CHANGELOG, unit tests,
   end-to-end test on the bench. Revised on 2026-10-28 after the project review (security fixes, rate default,
-  `cleanup()`, error-path and in-process integration tests, explicit sdist contents). Still to do for listing: PyPI
-  release, 30–60 s video with an interruption, PR to the Pipecat docs.
+  `cleanup()`, error-path and in-process integration tests, explicit sdist contents). Listed on 2026-10-28: 0.1.0 on
+  PyPI, demo video in the README, Discord post; the Pipecat docs PR (pipecat-ai/docs#1611) was merged on
+  2026-10-30.
 - **v0.2:** DTMF (ESL or a dialplan bind), adapters for `mod_audio_fork` and `mod_earshot`'s native protocol.
 - **v0.3:** a growing-block chunker (small first block, then ~1 s blocks) and latency metrics (time to first audio
   per block size).
@@ -314,9 +315,10 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
 - [x] README: intro, installation, usage, how to run the example, tested Pipecat version
 - [x] BSD-2 LICENSE
 - [x] CHANGELOG
-- [ ] PyPI release
+- [x] PyPI release (0.1.0, 2026-10-28)
 - [x] Hang-up through the native API (ESL)
 - [ ] DTMF → `InputDTMFFrame` (v0.2)
-- [ ] Fork of pipecat-ai/docs: row in `supported-services.mdx`, page `serializers/freeswitch.mdx`, `docs.json`
-- [ ] 30–60 s video showing it working + an interruption
-- [ ] Post in the Discord `#community-integrations` channel
+- [x] Fork of pipecat-ai/docs: row in `supported-services.mdx`, page `serializers/freeswitch.mdx`, `docs.json`
+  (pipecat-ai/docs#1611, merged on 2026-10-30)
+- [x] 30–60 s video showing it working + an interruption (README, Demo section)
+- [x] Post in the Discord `#community-integrations` channel
