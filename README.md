@@ -10,7 +10,7 @@ bot audio is played on the call, and barge-in, hang-up and keypad input (DTMF) w
 This is an independent community project, not affiliated with SignalWire (FreeSWITCH), Daily (Pipecat) or the
 mod_audio_stream authors.
 
-> **Status: v0.1.0, alpha.** Tested end to end against FreeSWITCH 1.11.3 with a Pipecat pipeline (tone playback,
+> **Status: v0.2.0, alpha.** Tested end to end against FreeSWITCH 1.11.3 with a Pipecat pipeline (tone playback,
 > hang-up after speech, interruption, DTMF), with unit and integration tests, and with calls from a softphone (Linphone)
 > and a desk phone (Grandstream) to the full STT → LLM → TTS example (all three on OpenRouter), barge-in included.
 > Deepgram, OpenAI, Cartesia and ElevenLabs direct have not been run against their live APIs yet.
