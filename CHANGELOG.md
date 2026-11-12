@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Growing blocks: `serializer.lookahead()` returns a `FreeSWITCHLookahead` processor to place right before
+  `transport.output()`. The serializer then takes the bot audio from it as fast as the TTS produces it and sends it
+  ahead of the transport's real-time clock, in blocks that grow while the bot speaks: the first one is as short as
+  the transport's chunk, and a few playbacks carry a whole utterance. Fewer playbacks mean the bot hears the caller
+  while it speaks. On the bench, with speech produced at three times real time, 40 ms chunks went from 75 playbacks
+  and ~100% of the caller's audio lost to 8 playbacks and 10%. The transport still paces the frames, so
+  `BotStoppedSpeakingFrame` keeps its timing. Audio the transport makes itself (mixer, end silence,
+  `OutputDTMFFrame` tones) is not played with it.
+- `InputParams.lookahead_margin_secs` (default 0.1): how far ahead of the transport's clock the audio sent must be
+  before the next block is held back.
+- `examples/bot.py` uses the lookahead processor (`LOOKAHEAD=0` turns it off).
+- Bench: scenario `listen` in `bench/run_e2e.py` measures how much of the caller's audio is lost while the bot
+  speaks; `--lookahead` and `--tone-speed` compare fixed and growing blocks at different synthesis speeds.
+
+### Fixed
+
+- A playback queued while an interruption's `uuid_break` was on its way was forgotten once the break was answered,
+  so a hang-up right after it could cut that audio off.
+- Documentation: Pipecat's WebSocket transport paces audio at real time, not at twice real time as the README and
+  the specification said. `BotStoppedSpeakingFrame` was never early.
+
 ## [0.2.0] - 2026-11-03
 
 ### Added

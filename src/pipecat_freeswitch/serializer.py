@@ -27,6 +27,7 @@ from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.serializers.base_serializer import FrameSerializer
 
 from pipecat_freeswitch.control import DEFAULT_ESL_PASSWORD, FreeSWITCHControl, is_valid_uuid
+from pipecat_freeswitch.lookahead import FreeSWITCHLookahead
 
 # Raw streamAudio payloads become .r8/.r16/... files, and mod_sndfile only plays raw audio at these
 # rates. 48 kHz is sent as WAV instead, which mod_sndfile plays at any rate.
@@ -38,13 +39,21 @@ _OUT_SAMPLE_RATES = _RAW_SAMPLE_RATES + _WAV_SAMPLE_RATES
 # hitting this means it never came: keep the latest audio instead of growing without bound.
 _MAX_HELD_SECS = 5
 
+# Longest block sent in one streamAudio message when the audio comes from the lookahead processor,
+# which can hand over a whole utterance at once. The rest goes out with the next chunks the
+# transport writes.
+_MAX_BLOCK_SECS = 5
+
 
 class FreeSWITCHFrameSerializer(FrameSerializer):
     """Serializer for the FreeSWITCH mod_audio_stream WebSocket protocol (open source edition).
 
     Caller audio arrives as binary L16 frames and becomes ``InputAudioRawFrame``.
     Bot audio leaves as ``streamAudio`` JSON messages, one per output frame, so
-    the block size is the transport's ``audio_out_10ms_chunks`` setting.
+    the block size is the transport's ``audio_out_10ms_chunks`` setting. The
+    transport sends those frames at real time. With the processor returned by
+    :meth:`lookahead` in the pipeline, the serializer sends the audio as soon
+    as it is produced instead, in blocks that grow while the bot speaks.
 
     Bot audio should reach FreeSWITCH at the channel's rate (8000 for G.711,
     16000 for G.722, 48000 for Opus): FreeSWITCH resamples each played file on
@@ -100,6 +109,14 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             auto_hang_up: Whether to hang up the call on EndFrame or CancelFrame.
             hang_up_timeout_secs: Maximum time to wait on EndFrame for queued
                 audio to finish playing before hanging up.
+            lookahead_margin_secs: With :meth:`lookahead` in the pipeline, how
+                far ahead of the transport's clock the audio already sent must
+                be, or the next block is sent. The transport itself runs one
+                chunk ahead of real time, so this is how much audio FreeSWITCH
+                still has to play, beyond that chunk, when the next block
+                leaves. A larger margin protects against blocks that arrive
+                late (a gap in the bot's voice) and makes the first blocks
+                smaller. At least one chunk is always used.
             ignore_rtvi_messages: Inherited from base FrameSerializer, defaults to True.
         """
 
@@ -111,6 +128,7 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         sample_rate: int | None = None
         auto_hang_up: bool = True
         hang_up_timeout_secs: float = 30.0
+        lookahead_margin_secs: float = 0.1
 
     def __init__(
         self,
@@ -177,14 +195,53 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         self._sent_messages = (
             0  # streamAudio messages sent; mod_audio_stream numbers files the same way
         )
-        self._held_audio = bytearray()  # bot audio produced before the control was ready
+        # Bot audio at the output rate that is still to be sent: produced before the control was
+        # ready or, with lookahead, ahead of the transport's clock.
+        self._buffer = bytearray()
         self._warned_held_audio = False
         self._hangup_attempted = False
+
+        self._lookahead: FreeSWITCHLookahead | None = None
+        # Whether the lookahead processor is running in the pipeline. Only then does the audio
+        # come from it, and the transport's audio frames only tell the time.
+        self._lookahead_active = False
+        # Interruptions the lookahead processor has seen and the transport has not written yet.
+        self._interruptions_ahead = 0
+        self._lookahead_got_audio = False
+        self._warned_lookahead_idle = False
+        # Bytes of audio sent beyond what the transport has written, at the output rate.
+        self._ahead = 0
+        self._lookahead_margin = 2 * int(
+            max(0.0, self._params.lookahead_margin_secs) * self._out_sample_rate
+        )
 
     @property
     def call_uuid(self) -> str | None:
         """UUID of the FreeSWITCH channel, once known."""
         return self._call_uuid
+
+    def lookahead(self) -> FreeSWITCHLookahead:
+        """Processor that lets the serializer send bot audio ahead of the transport's clock.
+
+        Place it right before ``transport.output()``, after every processor
+        that produces or changes bot audio. The serializer then takes the bot
+        audio from it, as soon as it is produced, and the chunks the transport
+        writes only tell the time: whenever the audio already sent is less
+        than ``lookahead_margin_secs`` ahead of that clock, the serializer
+        sends everything it holds as one block. The first block is as short as
+        the transport's chunk, and each one after it holds what was produced
+        while the one before played, so FreeSWITCH plays the speech in a few
+        growing playbacks instead of one per chunk. See
+        :class:`FreeSWITCHLookahead` for what else it changes. Without it in
+        the pipeline, the serializer sends the transport's chunks as they
+        come.
+
+        Returns:
+            The lookahead processor of this serializer, always the same one.
+        """
+        if self._lookahead is None:
+            self._lookahead = FreeSWITCHLookahead(self)
+        return self._lookahead
 
     async def setup(self, setup: FrameProcessorSetup):
         """Sets up the serializer with pipeline configuration.
@@ -220,50 +277,51 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
             await self._end_call(frame)
             return None
         elif isinstance(frame, InterruptionFrame):
-            self._held_audio.clear()
+            if self._interruptions_ahead:
+                # The lookahead processor already dropped the audio from before this
+                # interruption; what the buffer holds now came after it.
+                self._interruptions_ahead -= 1
+            else:
+                self._buffer.clear()
+            self._ahead = 0
             await self._control.interrupt(self._sent_messages)
             return None
         elif isinstance(frame, AudioRawFrame):
-            audio = await self._output_resampler.resample(
-                frame.audio, frame.sample_rate, self._out_sample_rate
-            )
-            if audio and self._output_gain != 1.0:
-                audio = scale_audio(audio, self._output_gain)
-            if not self._control.started:
-                # Nobody would play it yet: keep it and send it with the next block.
-                self._held_audio.extend(audio)
-                excess = len(self._held_audio) - _MAX_HELD_SECS * self._out_sample_rate * 2
-                if excess > 0:
-                    del self._held_audio[: excess + excess % 2]
-                    if not self._warned_held_audio:
-                        self._warned_held_audio = True
-                        logger.warning(
-                            f"{self}: no channel UUID yet, keeping only the last "
-                            f"{_MAX_HELD_SECS}s of bot audio"
-                        )
+            if not self._lookahead_active:
+                await self._buffer_audio(frame)
+                return self._next_block()
+            # The audio already came from the lookahead processor: this frame only tells that
+            # the transport's clock moved on. Until the transport writes an interruption the
+            # processor has seen, its frames are from before it and trigger nothing.
+            if self._interruptions_ahead:
                 return None
-            if self._held_audio:
-                audio = bytes(self._held_audio) + audio
-                self._held_audio.clear()
-            if not audio:
-                return None
-
-            self._sent_messages += 1
-            if self._out_sample_rate in _WAV_SAMPLE_RATES:
-                audio_type = "wav"
-                audio = pcm_to_wav(audio, self._out_sample_rate, 1)
-            else:
-                audio_type = "raw"
-            return json.dumps(
-                {
-                    "type": "streamAudio",
-                    "data": {
-                        "audioDataType": audio_type,
-                        "sampleRate": self._out_sample_rate,
-                        "audioData": base64.b64encode(audio).decode("utf-8"),
-                    },
-                }
-            )
+            if (
+                not self._lookahead_got_audio
+                and not self._warned_lookahead_idle
+                and frame.audio.strip(b"\x00")
+            ):
+                self._warned_lookahead_idle = True
+                logger.warning(
+                    f"{self}: the transport is writing audio the lookahead processor never "
+                    "saw, so it will not be played: place the processor right before "
+                    "transport.output()"
+                )
+            chunk_bytes = len(frame.audio) * self._out_sample_rate // frame.sample_rate
+            self._ahead -= chunk_bytes
+            block = None
+            # With a margin of at least one chunk, the last chunk of an utterance always
+            # sends what is left of it.
+            if self._ahead < max(self._lookahead_margin, chunk_bytes):
+                held = len(self._buffer)
+                block = self._next_block(
+                    max(_MAX_BLOCK_SECS * self._out_sample_rate * 2, chunk_bytes)
+                )
+                self._ahead += held - len(self._buffer)
+            if not self._buffer:
+                # Everything was sent, so what the transport wrote beyond it is audio it made
+                # itself (padding, silence), which is not played and takes no time.
+                self._ahead = max(self._ahead, 0)
+            return block
 
         # Return None for unhandled frames
         return None
@@ -317,12 +375,83 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
         await super().cleanup()
         await self._end_call(CancelFrame())
 
+    def _lookahead_started(self):
+        """The lookahead processor is running: bot audio comes from it from now on."""
+        self._lookahead_active = True
+
+    async def _lookahead_audio(self, frame: AudioRawFrame):
+        """Take bot audio from the lookahead processor, ahead of the transport's clock."""
+        self._lookahead_got_audio = True
+        await self._buffer_audio(frame)
+
+    def _lookahead_interrupted(self):
+        """An interruption passed the lookahead processor: drop the audio from before it."""
+        self._buffer.clear()
+        self._interruptions_ahead += 1
+
+    def _lookahead_bot_stopped(self):
+        """The transport finished an utterance, dropping whatever it still held of it.
+
+        Audio it dropped was sent but will never be written, so the count of audio sent ahead
+        would stay too high and delay the next blocks. Starting over only sends them sooner.
+        """
+        self._ahead = 0
+
+    async def _buffer_audio(self, frame: AudioRawFrame):
+        """Add bot audio to the buffer, at the output rate and with the gain applied."""
+        audio = await self._output_resampler.resample(
+            frame.audio, frame.sample_rate, self._out_sample_rate
+        )
+        if audio and self._output_gain != 1.0:
+            audio = scale_audio(audio, self._output_gain)
+        self._buffer.extend(audio)
+        if self._control.started:
+            return
+        # Nobody would play it yet: keep it, up to a limit, and send it with the next block.
+        excess = len(self._buffer) - _MAX_HELD_SECS * self._out_sample_rate * 2
+        if excess > 0:
+            del self._buffer[: excess + excess % 2]
+            if not self._warned_held_audio:
+                self._warned_held_audio = True
+                logger.warning(
+                    f"{self}: no channel UUID yet, keeping only the last "
+                    f"{_MAX_HELD_SECS}s of bot audio"
+                )
+
+    def _next_block(self, max_bytes: int | None = None) -> str | None:
+        """Take the buffered audio, or its first ``max_bytes``, as a ``streamAudio`` message."""
+        if not self._control.started or not self._buffer:
+            return None
+        size = len(self._buffer) if max_bytes is None else min(len(self._buffer), max_bytes)
+        size -= size % 2
+        audio = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        if not audio:
+            return None
+
+        self._sent_messages += 1
+        if self._out_sample_rate in _WAV_SAMPLE_RATES:
+            audio_type = "wav"
+            audio = pcm_to_wav(audio, self._out_sample_rate, 1)
+        else:
+            audio_type = "raw"
+        return json.dumps(
+            {
+                "type": "streamAudio",
+                "data": {
+                    "audioDataType": audio_type,
+                    "sampleRate": self._out_sample_rate,
+                    "audioData": base64.b64encode(audio).decode("utf-8"),
+                },
+            }
+        )
+
     async def _end_call(self, frame: EndFrame | CancelFrame):
         if self._params.auto_hang_up and not self._hangup_attempted:
             self._hangup_attempted = True
             if isinstance(frame, EndFrame):
-                # The transport sends audio faster than real time, so a lot of it
-                # can still be queued in FreeSWITCH: let it finish.
+                # The last blocks are still playing, or on their way to FreeSWITCH: let
+                # them finish.
                 await self._control.wait_for_playback(
                     self._sent_messages, self._params.hang_up_timeout_secs
                 )

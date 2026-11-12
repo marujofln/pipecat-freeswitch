@@ -22,7 +22,8 @@ class FakeESLServer:
     Failures are set up through attributes: ``greeting`` replaces the
     ``auth/request`` greeting, ``errors`` maps a command prefix to the error
     text to reply with, and a command starting with ``drop_on`` closes the
-    connection instead of being answered. With ``auto_complete_playback``,
+    connection instead of being answered, and ``hold`` maps a command prefix to
+    an event the reply waits for. With ``auto_complete_playback``,
     every ``sendmsg`` is followed by the ``CHANNEL_EXECUTE_COMPLETE`` of its
     playback, as if the file had played at once. With ``send_text``, the text
     of every ``uuid_audio_stream <uuid> send_text <text>`` is passed to it, as
@@ -36,6 +37,7 @@ class FakeESLServer:
         self.greeting = "auth/request"
         self.errors: dict[str, str] = {}
         self.drop_on: str | None = None
+        self.hold: dict[str, asyncio.Event] = {}
         self.auto_complete_playback = False
         self.send_text: Callable[[str], Awaitable[None]] | None = None
         # Client connections currently open, to catch leaked connections.
@@ -156,6 +158,9 @@ class FakeESLServer:
                 self._command_seen.set()
                 if self.drop_on and command.startswith(self.drop_on):
                     break
+                for prefix, released in self.hold.items():
+                    if command.startswith(prefix):
+                        await released.wait()
                 error = next((e for p, e in self.errors.items() if command.startswith(p)), None)
                 reply = error or "+OK"
                 args = command.split(" ", 4)

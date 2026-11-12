@@ -15,7 +15,15 @@ serializer), and checks what the caller hears:
 
 ``speak_end`` also measures first-audio latency, FreeSWITCH CPU time for the call, and how clean the tone
 sounds: in every 10 ms window of the caller's recording a 440 Hz sine is fitted and the residual reported in dB
-below the signal. A click at a block seam shows up as a window with a high residual ("glitch").
+below the signal. A click at a block seam shows up as a window with a high residual ("glitch"). It also counts
+the playbacks FreeSWITCH ran for the tone.
+
+- ``listen``: the bot plays a tone and keeps the call up. Reports how much of the caller's audio failed to
+  reach the bot's pipeline while the tone played: every playback that starts flushes 30-40 ms of it.
+
+``--lookahead off,on`` compares the transport's fixed blocks with the growing blocks of the serializer's
+lookahead processor, and ``--tone-speed`` sets how fast the bot produces the tone, as a speech synthesizer would
+(a multiple of real time; 0 queues it all at once).
 
     python3 bench/run_e2e.py                                   # PCMU, 8 kHz stream, 8 kHz blocks
     python3 bench/run_e2e.py --codec OPUS --in-rate 16000 --out-rates 16000,48000
@@ -37,7 +45,7 @@ import wave
 from pathlib import Path
 
 from esl import EslConnection
-from run_experiments import REPO, SUBSCRIPTIONS, Bench, Call, event_time, ms
+from run_experiments import REPO, SILENCE_RMS, SUBSCRIPTIONS, Bench, Call, event_time, ms
 
 BOT_URL = "http://127.0.0.1:8766"
 COMPOSE = REPO / "examples/freeswitch/docker-compose.yml"
@@ -111,11 +119,35 @@ async def wait_for_hangup(bench: Bench, uuid: str, timeout: float) -> float | No
     return None
 
 
-async def run_speak_end(bench: Bench, tone_seconds: float, chunks: int, rates: dict) -> dict:
+def caller_audio_lost_pct(log: list[dict], in_rate: int, start: float, end: float) -> float | None:
+    """Share of the caller's tone that did not reach the bot's pipeline between two wall times.
+
+    The caller sends a continuous tone. Audio FreeSWITCH flushes never arrives or arrives as silence,
+    so only the frames that carry the tone count as received.
+    """
+    finished = next((e for e in log if e["kind"] == "finished"), None)
+    if not finished or end <= start:
+        return None
+    received = sum(n for t, n, rms in finished.get("input_arrivals", []) if start <= t < end and rms >= SILENCE_RMS) / (
+        2 * in_rate
+    )
+    return round(max(0.0, 1 - received / (end - start)) * 100, 1)
+
+
+async def run_speak_end(
+    bench: Bench, tone_seconds: float, chunks: int, rates: dict, lookahead: bool, tone_speed: float
+) -> dict:
     """Bot plays a tone then queues EndFrame."""
     cpu_before = freeswitch_cpu_secs()
     call = await bench.place_call(
-        "bot", chunks * 10, tone_seconds, scenario="speak_end", audio_out_10ms_chunks=chunks, **rates
+        "bot",
+        chunks * 10,
+        tone_seconds,
+        scenario="speak_end",
+        audio_out_10ms_chunks=chunks,
+        lookahead=lookahead,
+        tone_speed=tone_speed,
+        **rates,
     )
     hangup_at = await wait_for_hangup(bench, call.leg_uuid, tone_seconds + 15)
     await bench.hang_up(call)
@@ -128,11 +160,16 @@ async def run_speak_end(bench: Bench, tone_seconds: float, chunks: int, rates: d
     finished = next((e for e in log if e["kind"] == "finished"), {})
     end_queued = first(log, "end_queued")
     tone_queued = first(log, "tone_queued")
+    playbacks = [(s, e) for s, e in bench.playbacks(call.leg_uuid) if e is not None]
     return {
         "scenario": "speak_end",
         "codec": bench.codec,
         **rates,
         "block_ms": chunks * 10,
+        "lookahead": lookahead,
+        "tone_speed": tone_speed,
+        "playbacks": len(playbacks),
+        "playback_ms": [ms(e - s) for s, e in playbacks],
         "leg_uuid": call.leg_uuid,
         "tone_s": tone_seconds,
         "heard_s": round(heard_s, 2),
@@ -149,6 +186,51 @@ async def run_speak_end(bench: Bench, tone_seconds: float, chunks: int, rates: d
         "glitch_windows": sum(1 for r in residuals if r > GLITCH_DB),
         "windows": len(residuals),
         "freeswitch_cpu_ms": round(cpu * 1000),
+    }
+
+
+async def run_listen(
+    bench: Bench, tone_seconds: float, chunks: int, rates: dict, lookahead: bool, tone_speed: float
+) -> dict:
+    """Bot plays a tone and keeps the call up: how much caller audio is lost while it plays."""
+    interrupted_tone, bench.caller_tone = bench.caller_tone, "%(10000,0,1000)"  # no silent half
+    try:
+        call = await bench.place_call(
+            "bot",
+            chunks * 10,
+            tone_seconds,
+            scenario="listen",
+            audio_out_10ms_chunks=chunks,
+            lookahead=lookahead,
+            tone_speed=tone_speed,
+            **rates,
+        )
+    finally:
+        bench.caller_tone = interrupted_tone
+    await wait_for_hangup(bench, call.leg_uuid, tone_seconds + 15)
+    await bench.hang_up(call)
+    log = bot_log(bench, call.leg_uuid)
+    heard = bench.audible_spans(call)
+    heard_s = sum(e - s for s, e in heard)
+    tone_queued = first(log, "tone_queued")
+    playbacks = [(s, e) for s, e in bench.playbacks(call.leg_uuid) if e is not None]
+    return {
+        "scenario": "listen",
+        "codec": bench.codec,
+        **rates,
+        "block_ms": chunks * 10,
+        "lookahead": lookahead,
+        "tone_speed": tone_speed,
+        "leg_uuid": call.leg_uuid,
+        "tone_s": tone_seconds,
+        "playbacks": len(playbacks),
+        "playback_ms": [ms(e - s) for s, e in playbacks],
+        "caller_audio_lost_pct": caller_audio_lost_pct(log, rates["in_rate"], playbacks[0][0], playbacks[-1][1])
+        if playbacks
+        else None,
+        "heard_s": round(heard_s, 2),
+        "holes_heard": len(bench.holes(call)),
+        "first_audio_ms": ms(heard[0][0] - tone_queued) if heard and tone_queued else None,
     }
 
 
@@ -184,7 +266,9 @@ async def run_auth() -> dict:
     }
 
 
-async def run_interrupt(bench: Bench, tone_seconds: float, after_s: float, chunks: int, rates: dict) -> dict:
+async def run_interrupt(
+    bench: Bench, tone_seconds: float, after_s: float, chunks: int, rates: dict, lookahead: bool, tone_speed: float
+) -> dict:
     """Bot is interrupted while playing a tone."""
     call = await bench.place_call(
         "bot",
@@ -193,6 +277,8 @@ async def run_interrupt(bench: Bench, tone_seconds: float, after_s: float, chunk
         scenario="interrupt",
         interrupt_after_s=after_s,
         audio_out_10ms_chunks=chunks,
+        lookahead=lookahead,
+        tone_speed=tone_speed,
         **rates,
     )
     await wait_for_hangup(bench, call.leg_uuid, after_s + 15)
@@ -206,6 +292,8 @@ async def run_interrupt(bench: Bench, tone_seconds: float, after_s: float, chunk
         "codec": bench.codec,
         **rates,
         "block_ms": chunks * 10,
+        "lookahead": lookahead,
+        "tone_speed": tone_speed,
         "leg_uuid": call.leg_uuid,
         "tone_s": tone_seconds,
         "interrupt_after_s": after_s,
@@ -244,7 +332,7 @@ async def run_dtmf(bench: Bench, rates: dict) -> dict:
 
 
 async def main():
-    """Run both scenarios and print the results."""
+    """Run the scenarios and print the results."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--chunks", default="4,20", help="audio_out_10ms_chunks values (block = 10 ms each)")
     parser.add_argument("--tone-seconds", type=float, default=3.0)
@@ -252,7 +340,16 @@ async def main():
     parser.add_argument("--in-rate", type=int, default=8000, choices=sorted(EXTENSIONS))
     parser.add_argument("--out-rates", default="8000", help="freeswitch_out_sample_rate values to compare")
     parser.add_argument("--pipeline-out-rate", type=int, default=24000, help="pipeline (TTS) output rate")
-    parser.add_argument("--scenarios", default="auth,speak_end,interrupt,dtmf")
+    parser.add_argument("--scenarios", default="auth,speak_end,listen,interrupt,dtmf")
+    parser.add_argument(
+        "--lookahead", default="off", help="lookahead processor in the bot's pipeline: on, off or off,on"
+    )
+    parser.add_argument(
+        "--tone-speed",
+        type=float,
+        default=0.0,
+        help="how fast the bot produces the tone, as a multiple of real time (0: all at once)",
+    )
     args = parser.parse_args()
 
     conn = await EslConnection.connect("127.0.0.1", 8021, "ClueCon")
@@ -284,14 +381,16 @@ async def main():
                 results.append(result)
                 print(json.dumps(result), flush=True)
             for chunks in (int(c) for c in args.chunks.split(",")):
-                if "speak_end" in scenarios:
-                    result = await run_speak_end(bench, args.tone_seconds, chunks, rates)
-                    results.append(result)
-                    print(json.dumps(result), flush=True)
-                if "interrupt" in scenarios:
-                    result = await run_interrupt(bench, 6.0, 1.5, chunks, rates)
-                    results.append(result)
-                    print(json.dumps(result), flush=True)
+                for lookahead in (value == "on" for value in args.lookahead.split(",")):
+                    for name, run in (("speak_end", run_speak_end), ("listen", run_listen)):
+                        if name in scenarios:
+                            result = await run(bench, args.tone_seconds, chunks, rates, lookahead, args.tone_speed)
+                            results.append(result)
+                            print(json.dumps(result), flush=True)
+                    if "interrupt" in scenarios:
+                        result = await run_interrupt(bench, 6.0, 1.5, chunks, rates, lookahead, args.tone_speed)
+                        results.append(result)
+                        print(json.dumps(result), flush=True)
     finally:
         collector.cancel()
         await conn.api("hupall")

@@ -5,6 +5,9 @@ counts the caller audio it receives and plays a tone, then, depending on the sce
 ``POST /config``:
 
 - ``speak_end``: queue ``EndFrame`` right after the tone (the serializer must let it finish, then hang up).
+- ``listen``: keep the call up for a second after the tone has played, then end it. The caller audio
+  reaching the pipeline is logged with its arrival time and level, to see how much of it is lost while
+  the bot speaks.
 - ``interrupt``: push an interruption ``interrupt_after_s`` after the tone starts (playback must stop
   at once and stay stopped), then end the call.
 - ``dtmf``: play nothing and end the call after ``tone_seconds``; every ``InputDTMFFrame`` reaching the
@@ -65,6 +68,11 @@ class BotConfig(BaseModel):
     out_rate: int = 8000
     # Pipeline output rate (the "TTS" rate); the serializer resamples it to out_rate.
     pipeline_out_rate: int = 8000
+    # Put the serializer's lookahead processor in the pipeline.
+    lookahead: bool = False
+    # How fast the tone is produced, as a multiple of real time, like a speech synthesizer would
+    # (0: all at once).
+    tone_speed: float = 0.0
 
 
 app = FastAPI()
@@ -97,6 +105,8 @@ class InputCounter(FrameProcessor):
         self.uuid = uuid
         self.frames = 0
         self.bytes = 0
+        # (wall time, bytes, RMS) of every caller audio frame, to see when caller audio went missing.
+        self.arrivals: list[tuple[float, int, int]] = []
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Count caller audio, log DTMF keys and pass every frame on."""
@@ -104,6 +114,9 @@ class InputCounter(FrameProcessor):
         if isinstance(frame, InputAudioRawFrame):
             self.frames += 1
             self.bytes += len(frame.audio)
+            samples = array.array("h", frame.audio)
+            rms = math.isqrt(sum(s * s for s in samples) // max(1, len(samples)))
+            self.arrivals.append((round(time.time(), 4), len(frame.audio), rms))
         elif isinstance(frame, InputDTMFFrame):
             log_event(self.uuid, "dtmf", digit=frame.button.value)
         await self.push_frame(frame, direction)
@@ -151,7 +164,14 @@ async def ws_endpoint(websocket: WebSocket):
     )
     counter = InputCounter(uuid)
     worker = PipelineWorker(
-        Pipeline([transport.input(), counter, transport.output()]),
+        Pipeline(
+            [
+                transport.input(),
+                counter,
+                *([serializer.lookahead()] if scenario.lookahead else []),
+                transport.output(),
+            ]
+        ),
         params=PipelineParams(audio_in_sample_rate=scenario.in_rate, audio_out_sample_rate=scenario.pipeline_out_rate),
     )
 
@@ -164,12 +184,31 @@ async def ws_endpoint(websocket: WebSocket):
             return
         frames = tone_frames(scenario.tone_seconds, scenario.pipeline_out_rate)
         log_event(uuid, "tone_queued", seconds=scenario.tone_seconds, frames=len(frames))
+
+        async def queue_tone():
+            if scenario.tone_speed <= 0:
+                await worker.queue_frames(frames)
+                return
+            started = time.monotonic()
+            for i, frame in enumerate(frames):
+                await asyncio.sleep(max(0.0, started + i * 0.02 / scenario.tone_speed - time.monotonic()))
+                await worker.queue_frame(frame)
+
         if scenario.scenario == "speak_end":
-            await worker.queue_frames([*frames, EndFrame()])
+            await queue_tone()
+            await worker.queue_frame(EndFrame())
             log_event(uuid, "end_queued")
+        elif scenario.scenario == "listen":
+            started = time.monotonic()
+            await queue_tone()
+            # The pipeline stops taking caller audio once EndFrame is queued.
+            await asyncio.sleep(max(0.0, started + scenario.tone_seconds + 1.0 - time.monotonic()))
+            log_event(uuid, "end_queued")
+            await worker.queue_frame(EndFrame())
         else:
-            await worker.queue_frames(frames)
+            tone = asyncio.create_task(queue_tone())
             await asyncio.sleep(scenario.interrupt_after_s)
+            tone.cancel()
             log_event(uuid, "interrupt")
             await worker.queue_frame(InterruptionWorkerFrame())
             await asyncio.sleep(2.0)
@@ -185,7 +224,7 @@ async def ws_endpoint(websocket: WebSocket):
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
     await runner.run()
-    log_event(uuid, "finished", input_frames=counter.frames, input_bytes=counter.bytes)
+    log_event(uuid, "finished", input_frames=counter.frames, input_bytes=counter.bytes, input_arrivals=counter.arrivals)
 
 
 if __name__ == "__main__":

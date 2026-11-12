@@ -35,7 +35,9 @@ The bot listens on `127.0.0.1:8767` and uses the bench's token (`bench-token`, `
 refuses to start if a key is missing. Interrupt it while it speaks to see barge-in. **Use a headset:** on
 loudspeaker the bot may hear its own voice and interrupt itself. If barge-in does not work, see "Choosing the block
 size" in the [main README](../../README.md#choosing-the-block-size): each block FreeSWITCH plays deafens the channel
-for 30–40 ms, so the bot uses 200 ms blocks. Speak English: the bot's prompt and speech-to-text default to it.
+for 30–40 ms, so the bot starts each utterance with a 200 ms block and sends the rest ahead in growing blocks
+(`LOOKAHEAD=0` in `.env` goes back to fixed 200 ms blocks). Speak English: the bot's prompt and speech-to-text
+default to it.
 
 The providers are picked in `.env` (`STT_PROVIDER`, `LLM_PROVIDER`, `TTS_PROVIDER`; see `.env.example` and the
 [main README](../../README.md#example)). For example, `LLM_PROVIDER=openrouter` with `OPENROUTER_API_KEY` replaces
@@ -61,7 +63,8 @@ End-to-end test of `FreeSWITCHFrameSerializer` (extension `9998`, served by a Pi
 
 ```bash
 .venv/bin/python bench/tone_bot.py &   # from the repository root, with pipecat-ai[websocket], fastapi, uvicorn
-python3 bench/run_e2e.py               # speak_end and interrupt scenarios, 40 and 200 ms blocks
+python3 bench/run_e2e.py               # auth, speak_end, listen, interrupt and dtmf; 40 and 200 ms blocks
+python3 bench/run_e2e.py --scenarios listen --lookahead off,on --tone-speed 3   # fixed against growing blocks
 ```
 
 Results on 2026-10-27 (SIP, 8 kHz):
@@ -74,6 +77,32 @@ Results on 2026-10-27 (SIP, 8 kHz):
 | 200 ms | interruption 1.5 s in | 17 ms of audio after the interruption, no resume |
 
 The 80 ms missing are the bench's receiving FreeSWITCH (see the talkspurt section below), not the serializer.
+
+**Growing blocks** (`--scenarios listen --lookahead off,on --tone-speed N`, 2026-11-12, SIP, PCMU, 3 s tone). The
+caller leg sends a continuous tone, and "caller audio lost" is the share of it that did not reach the bot's pipeline
+while the bot's tone played. `--tone-speed` is how fast the bot produces its tone, as a speech synthesizer would
+(a multiple of real time). With `--lookahead on` the bot's pipeline has `serializer.lookahead()` before the output.
+
+| Chunk | Lookahead | Source | Playbacks | Lengths (ms) | Caller audio lost |
+|---:|---|---:|---:|---|---:|
+| 40 ms | off | 3× | 75 | 40 each | 100% |
+| 200 ms | off | 3× | 15 | 200 each | 19.8% |
+| 40 ms | on | 1.2× | 35 | ~40 each, slowly growing | 46.6% |
+| 200 ms | on | 1.2× | 14 | 180–240 | 18.5% |
+| 40 ms | on | 3× | 8 | 41, 21, 60, 121, 142, 342, 1110, 1149 | 10.3% |
+| 200 ms | on | 3× | 5 | 203, 203, 402, 607, 1593 | 6.9% |
+| 40 ms | on | 10× | 5 | 41, 20, 362, 2398, 161 | 6.2% |
+| 200 ms | on | 10× | 4 | 201, 200, 1811, 785 | 5.3% |
+
+- The tone was heard whole in every run, with no more holes than with fixed blocks (0 or 1, the bench's own).
+- `interrupt` with lookahead: 15–21 ms of audio after the interruption, no resume, as with fixed blocks.
+- Opus at 48 kHz, 8 s tone produced at once: two playbacks (5.0 s, the serializer's cap, and 3.0 s; the first is a
+  640 kB WebSocket message) and 0.7% of the caller lost, against 200 playbacks and 99.3% with fixed 40 ms blocks.
+- The voice bot (`9996`, an ElevenLabs voice through OpenRouter): a 3 s greeting took 16 playbacks with fixed 200 ms
+  blocks and 3–4 with lookahead (for example 504, 262, 1108 and 1413 ms), with at most 1.5 ms between the end of one
+  and the start of the next.
+- A first attempt joined the files in FreeSWITCH with `playback file_string://a!b!c`: every such playback started
+  with 250 ms of silence, which `mod_dptools` inserts before the first file of a `file_string` (`next_file`).
 
 **Codecs and rates** (`run_e2e.py --codec ... --in-rate ... --out-rates ... --pipeline-out-rate ...`, 3 s tone).
 "Glitch" = a 10 ms window of the caller's recording where a fitted 440 Hz sine leaves a residual above −20 dB;

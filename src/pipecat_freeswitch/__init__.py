@@ -8,6 +8,7 @@
 
 from pipecat_freeswitch.control import FreeSWITCHControl
 from pipecat_freeswitch.esl import ESLConnection, ESLError
+from pipecat_freeswitch.lookahead import FreeSWITCHLookahead
 from pipecat_freeswitch.serializer import FreeSWITCHFrameSerializer
 
 __version__ = "0.2.0"
@@ -17,4 +18,5 @@ __all__ = [
     "ESLError",
     "FreeSWITCHControl",
     "FreeSWITCHFrameSerializer",
+    "FreeSWITCHLookahead",
 ]

@@ -81,6 +81,7 @@ class Bench:
     endpoint: str = "loopback"
     extension: str = "9999"
     codec: str | None = None  # absolute_codec_string for the call, e.g. "OPUS" or "PCMU"
+    caller_tone: str = "%(500,500,1000)"  # tone_stream the caller leg plays: (on ms, off ms, Hz)
     events: list[dict] = field(default_factory=list)
 
     async def collect_events(self) -> None:
@@ -160,7 +161,7 @@ class Bench:
         await self.conn.api(
             f"originate {{origination_uuid={call.caller_uuid},RECORD_READ_ONLY=true{codec}}}"
             f"{DIAL_STRINGS[self.endpoint].format(extension=self.extension)} "
-            "&endless_playback(tone_stream://%(500,500,1000))"
+            f"&endless_playback(tone_stream://{self.caller_tone})"
         )
         call.leg_uuid = await self.wait_for_connect(since)
         call.recording = f"/captures/{call.caller_uuid}-caller.wav"

@@ -126,7 +126,12 @@ OUTPUT_GAIN_DB = float(os.getenv("OUTPUT_GAIN_DB", "-12"))
 # block. Measured on the bench while the bot speaks: 40 ms blocks lose ~100% of the caller (no
 # barge-in by voice at all), 200 ms blocks 16%, 1 s blocks 4%. Larger blocks cost first-audio
 # latency (a block plays only once it is complete).
+#
+# With LOOKAHEAD (the default), BLOCK_MS is only the size of the first block of an utterance: the
+# serializer takes the speech from the pipeline as fast as the TTS produces it and sends it ahead
+# in blocks that grow, so a few playbacks carry the whole utterance.
 BLOCK_MS = int(os.getenv("BLOCK_MS", "200"))
+LOOKAHEAD = os.getenv("LOOKAHEAD", "1") != "0"
 
 # Shared secret that FreeSWITCH sends in the Authorization header (STREAM_EXTRA_HEADERS).
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -341,7 +346,7 @@ async def run_bot(websocket: WebSocket, call_uuid: str, in_rate: int, out_rate: 
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            # Each output chunk becomes one file played by FreeSWITCH (see BLOCK_MS).
+            # The first block of an utterance, or every block without LOOKAHEAD (see BLOCK_MS).
             audio_out_10ms_chunks=BLOCK_MS // 10,
             # No trailing silence: the serializer already waits for playback before hanging up.
             audio_out_end_silence_secs=0,
@@ -382,6 +387,9 @@ async def run_bot(websocket: WebSocket, call_uuid: str, in_rate: int, out_rate: 
             aggregators.user(),
             llm,
             tts,
+            # Right before the output: the speech reaches the serializer ahead of the
+            # transport's real-time clock.
+            *([serializer.lookahead()] if LOOKAHEAD else []),
             transport.output(),
             aggregators.assistant(),
         ]

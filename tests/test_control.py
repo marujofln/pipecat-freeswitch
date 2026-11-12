@@ -196,3 +196,25 @@ async def test_failed_dtmf_forward_does_not_stop_the_control(esl_server, control
     await esl_server.wait_for_command("api uuid_audio_stream")
     await esl_server.emit_play(UUID, 0)
     await esl_server.wait_for_command("sendmsg")
+
+
+async def test_playback_queued_during_an_interruption_is_still_waited_for(esl_server, control):
+    await started(control)
+    await esl_server.emit_play(UUID, 0)
+    await esl_server.wait_for_command("sendmsg")
+    esl_server.hold["api uuid_break"] = asyncio.Event()
+    interruption = asyncio.create_task(control.interrupt(1))
+    await esl_server.wait_for_command("api uuid_break")
+    # Audio sent after the interruption is announced before the break is answered, so its
+    # playback is queued right behind the break: forgetting the interrupted playback must not
+    # forget the new one.
+    await esl_server.emit_play(UUID, 1)
+    await asyncio.sleep(0.05)
+    esl_server.hold["api uuid_break"].set()
+    await interruption
+    async with asyncio.timeout(2):
+        while sum(command.startswith("sendmsg") for command in esl_server.commands) < 2:
+            await asyncio.sleep(0.005)
+    assert not await control.wait_for_playback(2, timeout=0.2)
+    await esl_server.emit_playback_complete(UUID, 1)
+    assert await control.wait_for_playback(2, timeout=1)

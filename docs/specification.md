@@ -106,6 +106,7 @@ pipecat-freeswitch/
 ├── src/pipecat_freeswitch/
 │   ├── __init__.py
 │   ├── serializer.py       # FreeSWITCHFrameSerializer
+│   ├── lookahead.py        # FreeSWITCHLookahead: hands bot audio to the serializer ahead of the transport
 │   ├── control.py          # FreeSWITCHControl: ESL (play via sendmsg, uuid_break all, uuid_kill)
 │   └── esl.py              # ESLConnection: minimal asyncio event socket client
 ├── bench/                  # bench: echo_server.py, esl.py, run_experiments.py, rtp_wire.py,
@@ -119,6 +120,7 @@ pipecat-freeswitch/
 │       └── conf/               # dialplan, SIP profiles, modules.conf.xml, event_socket.conf.xml
 ├── tests/
 │   ├── test_serializer.py
+│   ├── test_lookahead.py   # the lookahead processor (run with Pipecat's run_test) and the growing blocks
 │   ├── test_control.py     # error paths of FreeSWITCHControl
 │   ├── test_esl.py         # error paths of ESLConnection, event parsing
 │   ├── test_integration.py # real pipeline + FastAPIWebsocketTransport on uvicorn, client playing mod_audio_stream
@@ -161,14 +163,82 @@ Each block therefore deafens the channel for 30–40 ms, for every media bug on 
 
 With 40 ms blocks the bot never heard the caller while it spoke, so barge-in by voice never worked, on a softphone or
 a desk phone (it only worked when a late transcription arrived). The example bot now uses 200 ms blocks (`BLOCK_MS`).
-The proper fix is a chunker after all: a small first block for latency, then large blocks (~1 s), with the tail of
-each utterance flushed by the transport's trailing silence (`audio_out_end_silence_secs`), since nothing else calls
-the serializer at the end of an utterance. Not implemented yet. This also makes the pacing issue of PR pipecat-ai/pipecat#5593 moot: the serializer returns
-a payload for every audio frame.
+The proper fix is growing blocks: a small first block for latency, then larger ones. Implemented on 2026-11-12, see
+[Growing blocks](#growing-blocks-the-lookahead-processor-2026-11-12).
 
-`FastAPIWebsocketTransport` paces output at **twice real time** (`_send_interval = chunk / rate / 2`). FreeSWITCH
-therefore queues ahead of playback during speech, which removes the underrun risk measured with real-time pacing
-(no prebuffer needed) but makes waiting for playback before hang-up essential.
+**Corrected on 2026-11-11: the transport paces output at real time, not twice real time.** In
+`FastAPIWebsocketOutputTransport`, `_send_interval = (audio_chunk_size / sample_rate) / 2`, and `audio_chunk_size`
+is in bytes of 16-bit mono audio, so the interval is exactly the chunk's duration. Only the first two chunks of a
+run go out back to back, since the sleep comes after the write: FreeSWITCH holds one chunk of lead and no more.
+Measured in process: 40 ms chunks arrive every 40 ms. Earlier versions of this document, the README and a comment
+in the serializer said "twice real time" from reading the formula without the units. The consequences:
+
+- `BotStoppedSpeakingFrame` is on time (it was never early).
+- The underruns measured with real-time pacing (0–1 per call, ~20 ms) apply to fixed blocks. Waiting for playback
+  before the hang-up is still needed: the last block is always still playing.
+- With fixed blocks, a block cannot be longer than the first-audio delay one accepts. Blocks can only grow if the
+  audio reaches the serializer ahead of the transport's clock.
+
+## Growing blocks: the lookahead processor (2026-11-12)
+
+`serializer.lookahead()` returns a `FreeSWITCHLookahead` frame processor, placed right before `transport.output()`:
+
+```
+... -> TTS -> FreeSWITCHLookahead -> transport.output()
+                    │ (bot audio, as fast as the TTS produces it)       │ serialize(chunk): one per chunk
+                    └──────────────> serializer buffer <────────────────┘ duration, the clock
+```
+
+- The processor passes every frame on unchanged and hands each downstream `OutputAudioRawFrame` (default
+  destination only) to the serializer, which resamples it, applies the gain and keeps it in a buffer. The transport
+  still chunks and paces the same frames, so bot-speaking events and everything built on them stay in real time.
+- Once the processor has seen `StartFrame`, the serializer no longer sends the audio of the frames the transport
+  writes: each `serialize(audio frame)` is a clock tick. The serializer keeps one number, `ahead`: bytes sent beyond
+  what the transport has written. A tick subtracts the chunk; if the buffer is not empty and
+  `ahead < max(lookahead_margin_secs, one chunk)`, everything in the buffer (up to 5 s) goes out as one `streamAudio`
+  message and is added to `ahead`.
+- Why it grows: the first tick sends whatever was produced so far (at least one chunk). The next block leaves only
+  when that one is about to run out, and holds what the TTS produced meanwhile: about `k` times the previous block for
+  a TTS `k` times faster than real time.
+- Why nothing is left behind: with a margin of at least one chunk, the serializer has always sent at least as much
+  as the transport has written. The transport's last chunk of an utterance covers all the audio it received (it
+  holds back less than a chunk), so that tick sends the rest of the buffer. The floor of one chunk is what makes this
+  true when the transport holds back a remainder.
+- Audio the transport writes that the processor never saw (padding of the last chunk, end silence, mixer output,
+  `OutputDTMFFrame` tones) is not sent and must not count as time: when the buffer is empty, `ahead` is clamped to
+  zero.
+- `ahead` errs towards sending early. It is reset on every interruption and when `BotStoppedSpeakingFrame` comes
+  back upstream through the processor, which is when the transport drops audio it held (the count would otherwise
+  stay too high and delay the next blocks).
+- Interruption: the processor sees `InterruptionFrame` before the transport writes it. It clears the buffer at once
+  and counts the interruption as pending; until the transport's `serialize(InterruptionFrame)` arrives, ticks are
+  chunks from before the interruption and send nothing, while audio produced after it stays in the buffer. An
+  interruption that never passed the processor clears the buffer when the transport writes it.
+
+Rejected alternatives:
+
+- **Joining files in FreeSWITCH with `playback file_string://a!b!c`.** One file handle, so one audio sync, but
+  `mod_dptools` plays 250 ms of silence before the first file of every `file_string` that is not in the channel's
+  native format (`context->samples = (handle->samplerate / 1000) * 250` in `next_file`). Measured on the bench: every
+  joined playback started with a 250 ms hole. A first implementation batched files in `FreeSWITCHControl` this way and
+  was dropped.
+- **A faster transport clock** (subclassing the output transport): the pipeline would believe the bot finished
+  speaking long before the caller heard it, breaking interruption handling, and it depends on Pipecat's private API.
+- **A wall-clock estimate of FreeSWITCH's playout position** in the serializer: the transport's chunks already are
+  that clock, and using them keeps the logic deterministic and testable.
+
+Bench results (SIP, PCMU, 3 s tone, the caller sending a continuous tone; "lost" is the share of the caller's tone
+that did not reach the bot's pipeline while the bot's tone played):
+
+| Blocks | Source speed | Playbacks | Caller audio lost |
+|---|---:|---:|---:|
+| 40 ms fixed | any | 75 | ~100% |
+| 200 ms fixed | any | 15 | 19–20% |
+| lookahead, 40 ms chunks | 1.2× / 3× / 10× | 35 / 8 / 5 | 47% / 10% / 6% |
+| lookahead, 200 ms chunks | 1.2× / 3× / 10× | 14 / 5 / 4 | 19% / 7% / 5% |
+
+No gaps in the bot's tone in any run, interruption 15–21 ms, Opus 48 kHz with 5 s blocks (640 kB messages) played
+correctly, and the example bot with a real TTS went from 16 playbacks to 3–4 for a 3 s greeting.
 
 ## FreeSWITCHFrameSerializer (as implemented)
 
@@ -180,8 +250,10 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
     # params: freeswitch_sample_rate (8000), freeswitch_in_sample_rate (-> freeswitch_sample_rate),
     #   freeswitch_out_sample_rate (-> freeswitch_sample_rate; 8000/16000/24000/32000 raw, 48000 WAV),
     #   output_resampler_quality ("QQ"), output_gain_db (0.0), sample_rate, auto_hang_up (True),
-    #   hang_up_timeout_secs (30)
+    #   hang_up_timeout_secs (30), lookahead_margin_secs (0.1)
     #   Rates are validated in the constructor.
+    #
+    # lookahead(): the FreeSWITCHLookahead processor of this serializer (see "Growing blocks")
 
     # setup(): connect the control if call_uuid is known (setup runs twice: input and output transport)
     # deserialize: FreeSWITCH -> Pipecat
@@ -193,6 +265,8 @@ class FreeSWITCHFrameSerializer(FrameSerializer):
     #                           at freeswitch_out_sample_rate (resampled with SOXR "QQ" if the pipeline rate differs)
     #                           and scaled by output_gain_db (clipped to 16 bits)
     #                           (held and merged into the next block until the control is ready)
+    #                           with the lookahead processor running: a clock tick, which sends the
+    #                           audio taken from the processor when it is less than the margin ahead
     #   InterruptionFrame    -> control.interrupt(sent_messages): uuid_break all, drop stale files
     #   EndFrame             -> control.wait_for_playback() then uuid_kill (if auto_hang_up)
     #   CancelFrame          -> uuid_kill at once (if auto_hang_up)
@@ -238,7 +312,8 @@ the call was still up, the call parked. Two safeguards:
 Points of attention:
 - **Block size:** with `sendmsg` there is no fixed cost per file, so blocks can be small (40 ms tested end to end
   with no gap). What remains is the latency × overhead trade-off (base64, one file and one event per block), and,
-  as measured on 2026-10-28, how much caller audio each block's playback flushes (see above). The block size is the transport's `audio_out_10ms_chunks`.
+  as measured on 2026-10-28, how much caller audio each block's playback flushes (see above). The block size is the
+  transport's `audio_out_10ms_chunks`; with the lookahead processor it is only the first block's.
 - **File order:** `play` events arrive in `streamAudio` order, and `sendmsg` keeps the channel queue in order.
   `uuid_break all` clears the queue, but `play` events in flight can arrive after the break. Fix: the module names
   files `<uuid>_<n>` with `n` increasing per `streamAudio` (`audio_streamer_glue.cpp:430`); the serializer counts
@@ -260,8 +335,8 @@ Points of attention:
   to 50 ms of random delay: 0–1 underrun per call, ~20 ms each. The queue self-heals (after one late block,
   playback runs that much later and gains margin), so total silence is bounded by the largest delay in the call.
   A one-block prebuffer removes almost all of them (it only fails when the delay exceeds the block size), at the
-  cost of one block of latency. Not needed in v0.1: `FastAPIWebsocketTransport` sends at twice real time, so the
-  queue builds up ahead of playback.
+  cost of one block of latency. Not implemented: the transport's own lead is one chunk (the first two go out
+  together), and the lookahead processor sends the speech further ahead (at least `lookahead_margin_secs`).
 - **`uuid_kill` on `EndFrame` cuts off the end of the speech (confirmed).** Kill right after the last block: the last
   file never started and 240 ms of speech were lost (200 ms blocks). Waiting for the last file's
   `CHANNEL_EXECUTE_COMPLETE`: nothing lost, hang-up 270 ms after the last block. Implemented in v0.1 (with a
@@ -274,8 +349,9 @@ Points of attention:
 - **Bench with `mod_loopback`:** loses the last 20 ms frame of each back-to-back file (`playback` sends an audio sync
   when it starts and the loopback clears its outbound queue). It is a loopback artifact; audio measurements must use
   SIP (`--endpoint sip`, the default).
-- **Early `BotStoppedSpeakingFrame`:** with the transport sending at twice real time, it can arrive well before the
-  caller has heard the end of the speech (up to half the utterance for long ones). Documented as a known limitation.
+- **`BotStoppedSpeakingFrame` timing:** the transport paces audio at real time, so the frame comes when the caller
+  has heard the speech, give or take the playback latency (tens of milliseconds). An earlier note here said it could
+  come early; that followed from the wrong "twice real time" reading and was never observed.
 - **Hang-up:** `uuid_kill` tears the channel down in ~20 ms and the WebSocket closes in ~15 ms. The module does not
   raise `mod_audio_stream::disconnect` on hang-up, only when the server closes the connection.
 - **Deployment:** the bench's ESL listens on `127.0.0.1` only. In production the bot needs access to the event socket
@@ -327,8 +403,9 @@ The earlier sketch did not pass `<uuid>` as the first argument of `uuid_audio_st
 - **v0.2:** DTMF (implemented on 2026-11-03, see [DTMF](#dtmf-2026-11-03)). The other candidates were left out of
   this release: adapters for `mod_audio_fork` and `mod_earshot`'s native protocol, outbound ESL, and a per-call
   token.
-- **v0.3:** a growing-block chunker (small first block, then ~1 s blocks) and latency metrics (time to first audio
-  per block size).
+- **v0.3:** growing blocks through the lookahead processor (implemented on 2026-11-12, see
+  [Growing blocks](#growing-blocks-the-lookahead-processor-2026-11-12)). Still open: latency metrics (time to first
+  audio per block size) and playing `OutputDTMFFrame` tones with lookahead.
 
 ## Listing checklist (community integrations guide)
 

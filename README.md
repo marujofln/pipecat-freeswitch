@@ -40,7 +40,8 @@ Caller ──SIP/RTP──> FreeSWITCH ──(mod_audio_stream, WebSocket)──
 - **Bot audio**: each output frame becomes a `streamAudio` JSON message. The open source mod_audio_stream only writes
   it to a file and raises `mod_audio_stream::play`; **it does not play it**. The serializer therefore keeps an event
   socket (ESL) connection per call and queues `playback` of each file with `sendmsg`. (`uuid_broadcast` would add
-  100 ms of silence before every file.)
+  100 ms of silence before every file.) With the serializer's [lookahead processor](#growing-blocks-lookahead) in the
+  pipeline, the speech is sent ahead of time in blocks that grow, so a few playbacks carry a whole utterance.
 - **Barge-in**: on `InterruptionFrame`, `uuid_break <uuid> all` stops playback and clears the queue; audio still in
   flight from before the interruption is dropped.
 - **Hang-up**: on `EndFrame`, the serializer waits until the queued audio has finished playing, then runs
@@ -159,13 +160,21 @@ async def websocket_endpoint(websocket: WebSocket):
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            audio_out_10ms_chunks=20,      # 200 ms blocks: shorter ones deafen barge-in
+            audio_out_10ms_chunks=20,      # 200 ms: the first block of an utterance (see below)
             audio_out_end_silence_secs=0,  # the serializer waits for playback before hanging up
             serializer=serializer,
         ),
     )
-    # Build the pipeline with transport.input() ... transport.output() and run it, with
-    # PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000).
+    pipeline = Pipeline(
+        [
+            transport.input(),
+            ...,  # STT, context aggregator, LLM, TTS
+            serializer.lookahead(),  # optional: growing blocks, see "Choosing the block size"
+            transport.output(),
+            ...,
+        ]
+    )
+    # Run it with PipelineParams(audio_in_sample_rate=8000, audio_out_sample_rate=8000).
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
@@ -194,6 +203,7 @@ the event socket is ready. Reading it yourself, as above, lets the serializer co
 | `sample_rate` | `None` | Override for the pipeline input rate |
 | `auto_hang_up` | `True` | Hang up on `EndFrame` (after playback) and `CancelFrame` (at once) |
 | `hang_up_timeout_secs` | `30.0` | Maximum wait for queued audio on `EndFrame` |
+| `lookahead_margin_secs` | `0.1` | With `serializer.lookahead()`: the next block is sent when the audio already sent is less than this far ahead of the transport's clock; see [Growing blocks](#growing-blocks-lookahead) |
 
 Constructor: `call_uuid`, `esl_host` (`127.0.0.1`), `esl_port` (`8021`), `esl_password` (`ClueCon`), `params`, and
 optionally `control` (a `FreeSWITCHControl` to use instead of one built from the `esl_*` arguments).
@@ -223,8 +233,8 @@ rate). The simplest setup runs the pipeline output at that rate, so nothing is r
 ### Choosing the block size
 
 Each output chunk of the transport (`audio_out_10ms_chunks` × 10 ms) becomes one `streamAudio` message, one temporary
-file and one `playback` in FreeSWITCH. **Use 200 ms or more (`audio_out_10ms_chunks=20`), not 40 ms**, or the bot
-cannot hear the caller while it speaks:
+file and one `playback` in FreeSWITCH. **Without [lookahead](#growing-blocks-lookahead), use 200 ms or more
+(`audio_out_10ms_chunks=20`), not 40 ms**, or the bot cannot hear the caller while it speaks:
 
 - **Every `playback` that starts deafens the channel for 30–40 ms.** FreeSWITCH's `playback` sends an audio sync when
   it starts (`switch_ivr_play_file`), and on a SIP channel that resets the jitter buffer and flushes the caller's
@@ -239,6 +249,59 @@ cannot hear the caller while it speaks:
 - **Send the channel's real rate.** Opus may run at 48 or 16 kHz depending on the phone; if `freeswitch_out_sample_rate`
   differs, FreeSWITCH resamples every block on its own and clicks at the seams. The bench's dialplan passes
   `out_rate=${write_rate}` to the bot, which is the rate the channel actually negotiated.
+
+### Growing blocks (lookahead)
+
+Pipecat's WebSocket transport writes audio at real time, one chunk per chunk duration, with a single chunk of lead.
+FreeSWITCH therefore never holds more than one chunk, and the block size above is a fixed trade: small blocks for a
+quick start, large ones so the bot can hear the caller. A speech synthesizer is faster than real time, though, and
+the lookahead processor uses that:
+
+```python
+pipeline = Pipeline([transport.input(), stt, ..., tts, serializer.lookahead(), transport.output(), ...])
+```
+
+Placed **right before `transport.output()`**, after everything that produces or changes bot audio, it hands every
+bot audio frame to the serializer as soon as it is produced. The frames go on to the transport unchanged, and the
+transport still paces them, so `BotStartedSpeakingFrame`, `BotStoppedSpeakingFrame` and what depends on them (such
+as what the LLM context keeps after an interruption) work as before. The chunks the transport writes now only tell
+the time: when the audio already sent is less than `lookahead_margin_secs` (100 ms, and never less than one chunk)
+ahead of that clock, the serializer sends everything it holds as one block, up to 5 s. The first block of an
+utterance is as short as the transport's chunk, and each one after it holds what the synthesizer produced while the
+one before played, so the blocks grow as fast as the synthesizer outruns real time.
+
+Measured on the bench (SIP, PCMU, a 3 s tone while the caller sends a continuous tone; `bench/run_e2e.py --scenarios
+listen --lookahead off,on --tone-speed N`, where N is how fast the bot produces the tone):
+
+| Blocks | Source speed | Playbacks | Caller audio lost | Block lengths |
+|---|---:|---:|---:|---|
+| 40 ms, fixed | any | 75 | ~100% | 40 ms each |
+| 200 ms, fixed | any | 15 | 19–20% | 200 ms each |
+| lookahead, first block 40 ms | 3× | 8 | 10% | 40, 20, 60, 120, 140, 340, 1110, 1150 ms |
+| lookahead, first block 40 ms | 10× | 5 | 6% | 40, 20, 360, 2400, 160 ms |
+| lookahead, first block 200 ms | 3× | 5 | 7% | 200, 200, 400, 610, 1590 ms |
+| lookahead, first block 200 ms | 10× | 4 | 5% | 200, 200, 1810, 780 ms |
+| lookahead, first block 40 ms | 1.2× | 35 | 47% | about 40 ms each, growing slowly |
+| lookahead, first block 200 ms | 1.2× | 14 | 19% | 180–240 ms |
+
+The tone was heard whole and without gaps in every row, an interruption stopped it 15–21 ms later, and Opus at 48 kHz
+behaved the same (an 8 s tone produced at once: two playbacks, of 5 s and 3 s, with 0.7% of the caller lost against
+99% with fixed 40 ms blocks). With a real synthesizer (`examples/bot.py`, an ElevenLabs voice through OpenRouter,
+which delivers about half a second of speech at once), a 3 s greeting took 3–4 playbacks instead of 16, with less
+than 2 ms between them.
+
+- **What is lost is lost at the start of an utterance**, while the blocks are still short. With a fast synthesizer a
+  first block of 40 ms (`audio_out_10ms_chunks=4`) starts the speech sooner and costs little; with a slow one (close
+  to real time) the blocks barely grow, so keep 200 ms, which is never worse than fixed blocks.
+- **Only audio that passes through the processor is played.** Audio the transport produces by itself is not: the
+  output mixer (`audio_out_mixer`), the end silence (`audio_out_end_silence_secs`) and the tones of
+  `OutputDTMFFrame`. The transport's output filter and volume frames do not apply either. If the processor is in
+  the pipeline but sees no audio (placed before the TTS, say), the serializer logs a warning and nothing plays.
+- **`lookahead_margin_secs`** is how much audio FreeSWITCH still has to play, beyond the transport's own chunk of
+  lead, when the next block leaves. Raise it if blocks can arrive late (a bot far from FreeSWITCH, a loaded event
+  loop): a late block is a gap in the bot's voice. A larger margin only makes the first blocks smaller.
+- FreeSWITCH's `file_string://` cannot join the blocks instead: it plays 250 ms of silence before the first file
+  of every playback (hardcoded in `mod_dptools`).
 
 ### Bot audio level
 
@@ -265,8 +328,9 @@ On the bench, all twelve keys sent as RFC 2833 events over a SIP call reached th
 
 ### Known limitations
 
-- Pipecat's WebSocket transport sends audio about twice as fast as real time, so FreeSWITCH queues ahead of playback
-  and `BotStoppedSpeakingFrame` can arrive before the caller has heard the end of the speech.
+- Pipecat's WebSocket transport writes audio at real time with one chunk of lead, so FreeSWITCH holds a single
+  block ahead of playback. A block that arrives late is a short gap in the bot's voice; see
+  [Growing blocks](#growing-blocks-lookahead) for sending the speech ahead of time.
 - The serializer relies on mod_audio_stream naming files `<uuid>_<n>.tmp.<ext>` in send order to drop stale audio
   after an interruption; this was verified on commit `da8b068`. If a file name does not follow that scheme, the
   serializer logs a warning and numbers files in the order their `play` events arrive, which is the send order.
@@ -278,11 +342,12 @@ On the bench, all twelve keys sent as RFC 2833 events over a SIP call reached th
   of the calls in progress stay behind. A periodic cleanup handles them, with an age above your longest call so it
   never touches a live one, e.g. `find /tmp -maxdepth 1 -name '*-*-*-*-*_*.tmp.*' -mmin +240 -delete`. The package
   cannot delete them itself: the files belong to FreeSWITCH, on its host.
-- **Barge-in needs blocks of 200 ms or more.** Each block's `playback` flushes 30–40 ms of the caller's incoming audio
-  (see [Choosing the block size](#choosing-the-block-size)), so while the bot speaks the caller is partly lost: 14–16%
-  with 200 ms blocks, nearly all of it with 40 ms. Once Pipecat detects the caller, the bot's audio stops within a few
-  milliseconds (3–11 ms in FreeSWITCH, with the audio still in flight dropped). A fix that keeps the first block
-  small and grows the following ones is planned.
+- **Barge-in needs blocks of 200 ms or more, or lookahead.** Each block's `playback` flushes 30–40 ms of the
+  caller's incoming audio (see [Choosing the block size](#choosing-the-block-size)), so while the bot speaks the
+  caller is partly lost: 14–20% with 200 ms blocks, nearly all of it with 40 ms. With
+  [lookahead](#growing-blocks-lookahead) the blocks grow while the bot speaks and the loss drops to 5–10%, most of
+  it in the first few hundred milliseconds of an utterance. Once Pipecat detects the caller, the bot's audio stops
+  within a few milliseconds (3–11 ms in FreeSWITCH, with the audio still in flight dropped).
 - **Phone audio is quiet for Pipecat's default VAD.** A caller speaking normally measured 0.66–0.70 on Pipecat's
   volume scale, so the default `min_volume` of 0.6 misses speech that the flush above has already thinned out;
   `examples/bot.py` uses 0.4. With a loudspeaker and no echo cancellation, raise it again, or the bot may interrupt
@@ -344,6 +409,9 @@ checked in Pipecat's code, but neither provider has been run against its live AP
 Point the dialplan's `uuid_audio_stream` at `ws://BOT_HOST:8765/ws mono 8k ${uuid}`, with `STREAM_EXTRA_HEADERS`
 set as in [FreeSWITCH setup](#freeswitch-setup). The bot refuses to start without `BOT_TOKEN` or a service key;
 [`.env.example`](.env.example) lists the variables.
+
+The bot sends its speech ahead in [growing blocks](#growing-blocks-lookahead), starting each utterance with a block
+of `BLOCK_MS` (200 ms by default). `LOOKAHEAD=0` goes back to fixed blocks of `BLOCK_MS`.
 
 **Try it with a phone call, all in Docker:** the bench runs the bot as its `bot` service on extension `9996`. Copy
 `.env.example` to `.env` and fill in the keys, run `docker compose --profile bot up -d --build` in

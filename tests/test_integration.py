@@ -16,6 +16,7 @@ real ones, so a change in how Pipecat drives serializers shows up here.
 import asyncio
 import base64
 import json
+import time
 from collections.abc import Awaitable, Callable
 
 import pytest
@@ -69,7 +70,12 @@ class Recorder(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-def bot_app(esl_port: int, recorder: Recorder, on_connected: OnConnected | None = None) -> FastAPI:
+def bot_app(
+    esl_port: int,
+    recorder: Recorder,
+    on_connected: OnConnected | None = None,
+    lookahead: bool = False,
+) -> FastAPI:
     """A bot built like examples/bot.py, with the AI services left out."""
     app = FastAPI()
 
@@ -93,7 +99,14 @@ def bot_app(esl_port: int, recorder: Recorder, on_connected: OnConnected | None 
             ),
         )
         worker = PipelineWorker(
-            Pipeline([transport.input(), recorder, transport.output()]),
+            Pipeline(
+                [
+                    transport.input(),
+                    recorder,
+                    *([serializer.lookahead()] if lookahead else []),
+                    transport.output(),
+                ]
+            ),
             params=PipelineParams(
                 audio_in_sample_rate=PIPELINE_IN_RATE, audio_out_sample_rate=STREAM_RATE
             ),
@@ -239,6 +252,51 @@ async def test_interruption_stops_playback_and_the_call_still_ends(esl_server, s
     # The rest of the 3 s tone was dropped from the pipeline instead of being sent.
     assert 0 < audio_bytes(messages) < 3 * 16000
     # Playback that never completes was flushed by uuid_break, so the hang-up does not wait for it.
+    await esl_server.wait_for_command(f"api uuid_kill {UUID}")
+    await esl_server.wait_until_all_closed()
+
+
+async def test_lookahead_sends_speech_ahead_in_few_blocks(esl_server, serve):
+    esl_server.auto_complete_playback = True
+
+    async def speak(worker: PipelineWorker):
+        await worker.queue_frames([*tone(2.0), EndFrame()])
+
+    port = await serve(bot_app(esl_server.port, Recorder(), speak, lookahead=True))
+    started = time.monotonic()
+    messages = await mod_audio_stream(port, esl_server)
+    elapsed = time.monotonic() - started
+
+    # All of the speech, once: the transport's own 40 ms chunks (50 of them) are not sent.
+    assert audio_bytes(messages) == 2 * 16000
+    assert len(messages) <= 3
+    # The transport still paces the speech at real time, so the pipeline knows when it ends.
+    assert elapsed > 1.8
+    await esl_server.wait_for_command("api uuid_kill")
+    queued = sendmsgs(esl_server)
+    assert [play_path(UUID, i) in c for i, c in enumerate(queued)] == [True] * len(messages)
+    await esl_server.wait_until_all_closed()
+
+
+async def test_lookahead_interruption_drops_the_speech_and_plays_the_answer(esl_server, serve):
+    esl_server.auto_complete_playback = True
+
+    async def speak_then_interrupt(worker: PipelineWorker):
+        await worker.queue_frames(tone(3.0))
+        await asyncio.sleep(0.5)
+        await worker.queue_frame(InterruptionWorkerFrame())
+        await asyncio.sleep(0.2)
+        await worker.queue_frames([*tone(0.2), EndFrame()])
+
+    port = await serve(bot_app(esl_server.port, Recorder(), speak_then_interrupt, lookahead=True))
+    messages = await mod_audio_stream(port, esl_server)
+
+    assert f"api uuid_break {UUID} all" in esl_server.commands
+    # The 3 s were sent ahead before the interruption; what came after it is sent as well.
+    assert audio_bytes(messages) == 3 * 16000 + 3200
+    # ...and queued for playback, after the break.
+    last = next(c for c in sendmsgs(esl_server) if play_path(UUID, len(messages) - 1) in c)
+    assert esl_server.commands.index(last) > esl_server.commands.index(f"api uuid_break {UUID} all")
     await esl_server.wait_for_command(f"api uuid_kill {UUID}")
     await esl_server.wait_until_all_closed()
 

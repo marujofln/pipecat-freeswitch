@@ -162,13 +162,16 @@ class FreeSWITCHControl:
         if not self._conn or self._channel_gone:
             return
         self._discard_below = sent_messages
+        # A file sent after the interruption can be queued while the break is on its way: only
+        # the playbacks queued before it are stopped.
+        stale = set(self._pending)
         try:
             await self._conn.api(f"uuid_break {self._uuid} all")
         except ESLError as e:
             logger.error(f"{self}: uuid_break failed: {e}")
         # `uuid_break all` also removes queued playbacks, which then never complete.
         async with self._changed:
-            self._pending.clear()
+            self._pending -= stale
             self._changed.notify_all()
 
     async def wait_for_playback(self, sent_messages: int, timeout: float) -> bool:
