@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-12
+
 ### Added
 
 - Growing blocks: `serializer.lookahead()` returns a `FreeSWITCHLookahead` processor to place right before
@@ -24,6 +26,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Installing with Pipecat 1.16 failed on import (`No module named 'soxr'`): Pipecat made its SOXR resampler an
+  optional extra, so the package now depends on `pipecat-ai[soxr]`. The unit and integration tests pass on Pipecat
+  1.14.0 and 1.16.0.
 - A playback queued while an interruption's `uuid_break` was on its way was forgotten once the break was answered,
   so a hang-up right after it could cut that audio off.
 - Documentation: Pipecat's WebSocket transport paces audio at real time, not at twice real time as the README and

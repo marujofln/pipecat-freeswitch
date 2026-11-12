@@ -24,9 +24,10 @@ classifiers = [
     "Topic :: Communications :: Telephony",
     "Topic :: Multimedia :: Sound/Audio",
 ]
-# The ESL client is implemented on asyncio streams, so no extra dependency is needed.
+# The ESL client is implemented on asyncio streams, so no extra dependency is needed. The serializer
+# resamples with SOXR, which Pipecat installs by default up to 1.15 and only with this extra since 1.16.
 dependencies = [
-    "pipecat-ai>=1.14.0",
+    "pipecat-ai[soxr]>=1.14.0",
 ]
 
 [project.urls]
