@@ -76,6 +76,7 @@ pipeline needs (`websocket` for the transport, plus your STT/LLM/TTS services).
   <condition field="destination_number" expression="^9999$">
     <action application="answer"/>
     <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
+    <action application="set" data="STREAM_HEART_BEAT=5"/>
     <action application="set"
       data="stream_result=${uuid_audio_stream(${uuid} start ws://BOT_HOST:8765/ws mono 8k ${uuid})}"/>
     <action application="park"/>
@@ -88,6 +89,8 @@ with the token in `vars.xml` (a long random value, e.g. from `openssl rand -hex 
 ```xml
 <X-PRE-PROCESS cmd="set" data="bot_token=..."/>
 ```
+
+5. **A hang-up hook for when the bot dies** (mod_lua): see [When the bot process dies](#when-the-bot-process-dies).
 
 ### Securing the WebSocket
 
@@ -124,6 +127,39 @@ bot's environment, which checks it.
 - **Rotation**: change both sides and restart or reload them. While the two values differ, new calls are refused
   (HTTP 403); calls in progress are not affected, since the token is only checked on connection. To rotate with no
   refused calls, the bot would have to accept the old and the new token for a while; this is not implemented.
+
+### When the bot process dies
+
+The bot hangs up through the event socket, so a bot that dies cannot hang up: the dialplan's `park` keeps the
+caller on a silent line until they or the carrier give up. FreeSWITCH has to do it, and mod_audio_stream tells it
+when: a WebSocket that drops without a WebSocket CLOSE raises `mod_audio_stream::error`. A bot that ends the call
+closes the WebSocket cleanly, which raises `mod_audio_stream::disconnect` instead, so hooking only `error` never
+cuts a normal hang-up short.
+
+Load `mod_lua` and hook the event in `lua.conf.xml`:
+
+```xml
+<hook event="CUSTOM" subclass="mod_audio_stream::error" script="audio_stream_hangup.lua"/>
+```
+
+with [`audio_stream_hangup.lua`](examples/freeswitch/conf/scripts/audio_stream_hangup.lua) in FreeSWITCH's script
+directory. It hangs up with `NORMAL_TEMPORARY_FAILURE`, which tells these calls apart in the CDRs; replace the
+`uuid_kill` with a `uuid_transfer` to send the caller elsewhere instead. Measured on the bench
+(`bench/run_crash.py`), with the bot speaking:
+
+| The bot... | `error` raised after | Call hung up after | Without the hook |
+|---|---|---|---|
+| process is killed (`kill -9`, OOM, crash) | 21 ms (TCP closed by the kernel) | 44 ms | still up after 30 s |
+| host or network vanishes (simulated with `SIGSTOP`) | 13.5 s (`STREAM_HEART_BEAT=5`: two unanswered pings) | 13.5 s | still up after 30 s |
+| is not running when the call arrives | 32 ms (connection refused) | 51 ms | still up after 30 s |
+| is healthy | never (pings answered) | not hung up | — |
+
+The bot's normal hang-ups (end of call, interruptions, DTMF) pass the end-to-end bench unchanged with the hook in
+place, still ending with `NORMAL_CLEARING`.
+
+`STREAM_HEART_BEAT` (seconds) is what catches the second case: without it, a connection to a host that vanished
+stays open until TCP gives up, which can take many minutes. A vanished host is found 2–3 intervals after it stops
+answering.
 
 ## Usage
 

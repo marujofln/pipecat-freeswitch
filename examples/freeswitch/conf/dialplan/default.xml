@@ -17,6 +17,7 @@
       <condition field="destination_number" expression="^9998$">
         <action application="answer"/>
         <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
+        <action application="set" data="STREAM_HEART_BEAT=$${stream_heart_beat}"/>
         <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8766/ws mono 8k ${uuid})}"/>
         <action application="park"/>
       </condition>
@@ -26,6 +27,7 @@
       <condition field="destination_number" expression="^9996$">
         <action application="answer"/>
         <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
+        <action application="set" data="STREAM_HEART_BEAT=$${stream_heart_beat}"/>
         <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8767/ws?out_rate=${write_rate} mono 8k ${uuid})}"/>
         <action application="park"/>
       </condition>
@@ -37,6 +39,7 @@
       <condition field="destination_number" expression="^9995$">
         <action application="answer"/>
         <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
+        <action application="set" data="STREAM_HEART_BEAT=$${stream_heart_beat}"/>
         <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8767/ws?in_rate=16000&amp;out_rate=${write_rate} mono 16k ${uuid})}"/>
         <action application="park"/>
       </condition>
@@ -46,6 +49,7 @@
       <condition field="destination_number" expression="^9997$">
         <action application="answer"/>
         <action application="set" data='STREAM_EXTRA_HEADERS={"Authorization":"Bearer $${bot_token}"}'/>
+        <action application="set" data="STREAM_HEART_BEAT=$${stream_heart_beat}"/>
         <action application="set" data="stream_result=${uuid_audio_stream(${uuid} start ws://127.0.0.1:8766/ws mono 16k ${uuid})}"/>
         <action application="park"/>
       </condition>

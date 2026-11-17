@@ -78,6 +78,26 @@ Results on 2026-10-27 (SIP, 8 kHz):
 
 The 80 ms missing are the bench's receiving FreeSWITCH (see the talkspurt section below), not the serializer.
 
+When the bot process dies mid-call (`run_crash.py` starts its own `tone_bot.py`; do not run another):
+
+```bash
+python3 bench/run_crash.py             # kill -9, SIGSTOP (a vanished host), healthy control, no bot at all
+```
+
+The bench hangs those calls up from FreeSWITCH: `mod_lua` runs `conf/scripts/audio_stream_hangup.lua` on
+`mod_audio_stream::error` (`conf/autoload_configs/lua.conf.xml`), and the bot extensions set
+`STREAM_HEART_BEAT=$${stream_heart_beat}` (5 s, `conf/vars.xml`). Results on 2026-11-17 (SIP, 8 kHz, bot speaking):
+
+| Bot | `error` event | Hang-up (`NORMAL_TEMPORARY_FAILURE`) | Before the hook |
+|---|---|---|---|
+| `kill -9` | 21 ms, "Connection reset by peer" (or "abnormal EOF") | 44 ms | up after 30 s |
+| `SIGSTOP` | 13.5 s, "Ping timeout (no pong)" | 13.5 s | up after 30 s |
+| not running | 32 ms, "Connection refused" | 51 ms | up after 30 s |
+| healthy | none in 30 s | none | — |
+
+No `mod_audio_stream::disconnect` in any of them: libwsc reports a drop without a WebSocket CLOSE as an error, and
+only a clean close as a disconnect. `run_e2e.py` with the hook in place gives the same results as without it.
+
 **Growing blocks** (`--scenarios listen --lookahead off,on --tone-speed N`, 2026-11-12, SIP, PCMU, 3 s tone). The
 caller leg sends a continuous tone, and "caller audio lost" is the share of it that did not reach the bot's pipeline
 while the bot's tone played. `--tone-speed` is how fast the bot produces its tone, as a speech synthesizer would

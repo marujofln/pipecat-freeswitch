@@ -14,5 +14,6 @@
     <load module="mod_tone_stream"/>
     <load module="mod_event_socket"/>
     <load module="mod_audio_stream"/>
+    <load module="mod_lua"/>
   </modules>
 </configuration>

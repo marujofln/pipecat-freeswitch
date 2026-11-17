@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake pkg-config git ca-certificates autoconf automake libtool libtool-bin \
         yasm nasm uuid-dev zlib1g-dev libjpeg-dev libsqlite3-dev libcurl4-openssl-dev libpcre2-dev \
         libspeex-dev libspeexdsp-dev libedit-dev libssl-dev libldns-dev libtiff-dev libsndfile1-dev \
-        libevent-dev libopus-dev \
+        libevent-dev libopus-dev liblua5.3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -25,7 +25,8 @@ RUN git clone --depth 1 --branch ${SOFIA_VERSION} https://github.com/freeswitch/
 RUN git clone --depth 1 --branch ${FS_VERSION} https://github.com/signalwire/freeswitch.git
 WORKDIR /src/freeswitch
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
-# Minimal module set: SIP, loopback (automated tests), XML dialplan, ESL (control channel), file formats.
+# Minimal module set: SIP, loopback (automated tests), XML dialplan, ESL (control channel), file formats,
+# Lua (the event hook that hangs up calls whose bot went away, conf/scripts/audio_stream_hangup.lua).
 RUN ./bootstrap.sh -j \
     && cat > modules.conf <<'MODS'
 loggers/mod_console
@@ -41,6 +42,7 @@ formats/mod_native_file
 formats/mod_sndfile
 formats/mod_tone_stream
 event_handlers/mod_event_socket
+languages/mod_lua
 MODS
 RUN ./configure --prefix=/usr/local/freeswitch \
     && make -j"$(nproc)" && make install && make samples
@@ -55,7 +57,7 @@ RUN git clone https://github.com/amigniter/mod_audio_stream.git /src/mas \
 FROM debian:12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libuuid1 zlib1g libjpeg62-turbo libsqlite3-0 libcurl4 libpcre2-8-0 libspeex1 libspeexdsp1 libedit2 \
-        libssl3 libldns3 libtiff6 libsndfile1 libevent-2.1-7 libevent-pthreads-2.1-7 libopus0 ca-certificates \
+        libssl3 libldns3 libtiff6 libsndfile1 libevent-2.1-7 libevent-pthreads-2.1-7 libopus0 liblua5.3-0 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/freeswitch /usr/local/freeswitch
 COPY --from=build /usr/local/lib /usr/local/lib

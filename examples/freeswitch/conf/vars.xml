@@ -8,4 +8,8 @@
   <X-PRE-PROCESS cmd="set" data="default_areacode=11"/>
   <!-- Bearer token sent to the Pipecat bot (bench/tone_bot.py BOT_TOKEN). Use a long random value outside the bench. -->
   <X-PRE-PROCESS cmd="set" data="bot_token=bench-token"/>
+  <!-- WebSocket ping interval to the bot, in seconds (STREAM_HEART_BEAT). mod_audio_stream drops the
+       connection after two unanswered pings, so a bot host that vanishes without closing TCP is found
+       within 2-3 intervals, and conf/scripts/audio_stream_hangup.lua hangs the call up. -->
+  <X-PRE-PROCESS cmd="set" data="stream_heart_beat=5"/>
 </include>

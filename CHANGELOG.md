@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- README: "When the bot process dies". A dead bot cannot hang up, so the parked call stayed up with the caller on a
+  silent line. The bench now has a FreeSWITCH-side hook (`mod_lua`, `examples/freeswitch/conf/scripts/
+  audio_stream_hangup.lua`) on `mod_audio_stream::error`, which the module raises when the WebSocket drops without a
+  WebSocket CLOSE or cannot be opened, and `STREAM_HEART_BEAT` in the dialplan to notice a host that vanished.
+  A normal hang-up closes the WebSocket cleanly (`mod_audio_stream::disconnect`) and is left alone.
+- Bench: `bench/run_crash.py` kills (`SIGKILL`) or freezes (`SIGSTOP`) the bot mid-call, or calls with no bot
+  running, and measures how long the call stays up.
+
 ## [0.3.0] - 2026-11-12
 
 ### Added

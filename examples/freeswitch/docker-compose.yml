@@ -11,6 +11,7 @@ services:
       - ./conf/dialplan:/usr/local/freeswitch/etc/freeswitch/dialplan:ro
       - ./conf/sip_profiles:/usr/local/freeswitch/etc/freeswitch/sip_profiles:ro
       - ./conf/directory:/usr/local/freeswitch/etc/freeswitch/directory:ro
+      - ./conf/scripts:/usr/local/freeswitch/share/freeswitch/scripts:ro
       - ./captures:/captures   # caller-side recordings from bench/run_experiments.py
     environment:
       STREAM_BUFFER_SIZE: "20"
